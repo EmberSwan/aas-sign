@@ -215,6 +215,19 @@ to the platform API.
 - **Default TSA**: `http://timestamp.acs.microsoft.com/timestamping/RFC3161`
   (Microsoft's free service, colocated with Azure Trusted Signing).
   Plain HTTP -- integrity is guaranteed by the TSA's own signature.
+- **Transient network retry**: every public HTTPS/HTTP entry point
+  in the platform layer is wrapped in `platform::retry_transient`
+  (declared in `platform.hpp`).  Failures classed as transient
+  (DNS, TCP connect, TLS handshake, mid-request socket I/O) throw
+  `platform::TransientNetworkError`, which the retry helper catches
+  and re-runs up to 3 attempts with linear backoff (2 s, 4 s).
+  Permanent failures (config errors, missing CA bundle, malformed
+  responses, HTTP non-2xx, etc.) keep throwing plain
+  `std::runtime_error` so the retry loop doesn't mask them.  Safe
+  because every operation we retry is idempotent at the caller
+  level: Azure signing produces a fresh signature for the same
+  hash, the TSA produces a fresh timestamp, the OAuth token
+  endpoint returns a (server-cached) token.
 - **Concurrency**: `sign_one_file()` is called from worker threads
   (default 8, tunable via `--max-parallel`).  All signing primitives
   (`PeFile`, `azure_sign`, `tsa_timestamp`, `cms_*`) are per-instance or

@@ -1,9 +1,13 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace platform {
@@ -41,6 +45,42 @@ struct HttpResponse {
     int status;
     std::string body;
 };
+
+// Thrown when a network operation fails in a way that's likely
+// transient -- DNS, TCP connect, TLS handshake, mid-request socket
+// I/O.  The public HTTP entry points retry these a small number of
+// times before giving up; permanent failures (config errors,
+// missing CA bundle, malformed responses, etc.) continue to throw
+// plain std::runtime_error so the retry loop doesn't mask them.
+class TransientNetworkError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// Call `op()` up to `max_attempts` times, retrying on
+// TransientNetworkError with linear backoff (2 s, 4 s, ...).  If
+// every attempt fails, re-throws the last exception.  Caller must
+// ensure `op` is safe to call more than once -- our HTTPS/HTTP
+// operations all are: Azure signing produces a fresh signature for
+// the same hash, the TSA produces a fresh timestamp, the OAuth
+// token endpoint returns a (server-cached) token.
+template <class F>
+auto retry_transient(F &&op, int max_attempts = 3) -> decltype(op())
+{
+    for (int attempt = 1; ; ++attempt) {
+        try {
+            return op();
+        } catch (const TransientNetworkError &e) {
+            if (attempt >= max_attempts) throw;
+            std::ostringstream msg;
+            msg << "transient network error: " << e.what()
+                << "; retrying (attempt " << (attempt + 1)
+                << " of " << max_attempts << ")\n";
+            write_stderr(msg.str());
+            std::this_thread::sleep_for(std::chrono::seconds(attempt * 2));
+        }
+    }
+}
 
 HttpResponse https_post(const std::string &host, const std::string &path,
                         const std::string &bearer_token,

@@ -172,8 +172,8 @@ struct TlsConnection {
         ret = mbedtls_net_connect(&server_fd, host.c_str(), "443",
                                   MBEDTLS_NET_PROTO_TCP);
         if (ret != 0)
-            throw std::runtime_error("connect to " + host + ":443: " +
-                                     mbed_error(ret));
+            throw TransientNetworkError("connect to " + host + ":443: " +
+                                        mbed_error(ret));
 
         ret = mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
                                           MBEDTLS_SSL_TRANSPORT_STREAM,
@@ -221,8 +221,8 @@ struct TlsConnection {
         while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
             if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
                 ret != MBEDTLS_ERR_SSL_WANT_WRITE)
-                throw std::runtime_error("TLS handshake with " + host +
-                                         ": " + mbed_error(ret));
+                throw TransientNetworkError("TLS handshake with " + host +
+                                            ": " + mbed_error(ret));
         }
     }
 
@@ -245,7 +245,7 @@ struct TlsConnection {
             int ret = mbedtls_ssl_write(&ssl, p, remaining);
             if (ret < 0) {
                 if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-                throw std::runtime_error("ssl_write: " + mbed_error(ret));
+                throw TransientNetworkError("ssl_write: " + mbed_error(ret));
             }
             p += ret;
             remaining -= narrow<size_t>(ret);
@@ -262,7 +262,7 @@ struct TlsConnection {
             if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == 0)
                 break;
             if (ret < 0)
-                throw std::runtime_error("ssl_read: " + mbed_error(ret));
+                throw TransientNetworkError("ssl_read: " + mbed_error(ret));
             result.append(reinterpret_cast<char *>(buf), narrow<size_t>(ret));
         }
         return result;
@@ -338,13 +338,17 @@ HttpResponse https_post(const std::string &host, const std::string &path,
                         const std::string &bearer_token,
                         const std::string &json_body)
 {
-    return do_request(host, "POST", path, bearer_token, &json_body);
+    return retry_transient([&] {
+        return do_request(host, "POST", path, bearer_token, &json_body);
+    });
 }
 
 HttpResponse https_get(const std::string &host, const std::string &path,
                        const std::string &bearer_token)
 {
-    return do_request(host, "GET", path, bearer_token, nullptr);
+    return retry_transient([&] {
+        return do_request(host, "GET", path, bearer_token, nullptr);
+    });
 }
 
 // Parse "https://host[:port]/path?query" into components.  The port is
@@ -372,40 +376,44 @@ static void parse_https_url(const std::string &url,
 HttpResponse https_get_url(const std::string &url,
                            const std::string &bearer_token)
 {
-    std::string host, path;
-    parse_https_url(url, host, path);
+    return retry_transient([&] {
+        std::string host, path;
+        parse_https_url(url, host, path);
 
-    TlsConnection conn(host);
-    std::ostringstream req;
-    req << "GET " << path << " HTTP/1.1\r\n"
-        << "Host: " << host << "\r\n"
-        << "User-Agent: aas-sign/1.0\r\n"
-        << "Accept: application/json\r\n"
-        << "Authorization: Bearer " << bearer_token << "\r\n"
-        << "Connection: close\r\n\r\n";
-    conn.write_all(req.str());
-    return parse_http_response(conn.read_all());
+        TlsConnection conn(host);
+        std::ostringstream req;
+        req << "GET " << path << " HTTP/1.1\r\n"
+            << "Host: " << host << "\r\n"
+            << "User-Agent: aas-sign/1.0\r\n"
+            << "Accept: application/json\r\n"
+            << "Authorization: Bearer " << bearer_token << "\r\n"
+            << "Connection: close\r\n\r\n";
+        conn.write_all(req.str());
+        return parse_http_response(conn.read_all());
+    });
 }
 
 HttpResponse https_post_url(const std::string &url,
                             const std::string &content_type,
                             const std::string &body)
 {
-    std::string host, path;
-    parse_https_url(url, host, path);
+    return retry_transient([&] {
+        std::string host, path;
+        parse_https_url(url, host, path);
 
-    TlsConnection conn(host);
-    std::ostringstream req;
-    req << "POST " << path << " HTTP/1.1\r\n"
-        << "Host: " << host << "\r\n"
-        << "User-Agent: aas-sign/1.0\r\n"
-        << "Accept: application/json\r\n"
-        << "Content-Type: " << content_type << "\r\n"
-        << "Content-Length: " << body.size() << "\r\n"
-        << "Connection: close\r\n\r\n"
-        << body;
-    conn.write_all(req.str());
-    return parse_http_response(conn.read_all());
+        TlsConnection conn(host);
+        std::ostringstream req;
+        req << "POST " << path << " HTTP/1.1\r\n"
+            << "Host: " << host << "\r\n"
+            << "User-Agent: aas-sign/1.0\r\n"
+            << "Accept: application/json\r\n"
+            << "Content-Type: " << content_type << "\r\n"
+            << "Content-Length: " << body.size() << "\r\n"
+            << "Connection: close\r\n\r\n"
+            << body;
+        conn.write_all(req.str());
+        return parse_http_response(conn.read_all());
+    });
 }
 
 HttpResponse http_post_binary(const std::string &host, int port,
@@ -414,71 +422,74 @@ HttpResponse http_post_binary(const std::string &host, int port,
                               const std::string &accept,
                               const std::vector<uint8_t> &body)
 {
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
+    return retry_transient([&] {
+        addrinfo hints{};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
 
-    std::string port_str = std::to_string(port);
-    addrinfo *res = nullptr;
-    int gai = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res);
-    if (gai != 0)
-        throw std::runtime_error("getaddrinfo " + host + ": " +
-                                 gai_strerror(gai));
+        std::string port_str = std::to_string(port);
+        addrinfo *res = nullptr;
+        int gai = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res);
+        if (gai != 0)
+            throw TransientNetworkError("getaddrinfo " + host + ": " +
+                                        gai_strerror(gai));
 
-    int fd = -1;
-    for (addrinfo *a = res; a; a = a->ai_next) {
-        fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
-    if (fd < 0)
-        throw std::runtime_error("cannot connect to " + host + ":" + port_str);
-
-    std::ostringstream req;
-    req << "POST " << path << " HTTP/1.1\r\n";
-    req << "Host: " << host;
-    if (port != 80) req << ":" << port;
-    req << "\r\n";
-    req << "User-Agent: aas-sign/1.0\r\n";
-    req << "Content-Type: " << content_type << "\r\n";
-    if (!accept.empty())
-        req << "Accept: " << accept << "\r\n";
-    req << "Content-Length: " << body.size() << "\r\n";
-    req << "Connection: close\r\n\r\n";
-    std::string header = req.str();
-
-    auto write_n = [&](const uint8_t *p, size_t n) {
-        while (n > 0) {
-            ssize_t w = write(fd, p, n);
-            if (w <= 0) {
-                close(fd);
-                throw std::runtime_error("write to TSA failed");
-            }
-            p += w;
-            n -= size_t(w);
-        }
-    };
-    write_n(reinterpret_cast<const uint8_t *>(header.data()), header.size());
-    if (!body.empty())
-        write_n(body.data(), body.size());
-
-    std::string raw;
-    char buf[4096];
-    for (;;) {
-        ssize_t r = read(fd, buf, sizeof(buf));
-        if (r < 0) {
+        int fd = -1;
+        for (addrinfo *a = res; a; a = a->ai_next) {
+            fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+            if (fd < 0) continue;
+            if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) break;
             close(fd);
-            throw std::runtime_error("read from TSA failed");
+            fd = -1;
         }
-        if (r == 0) break;
-        raw.append(buf, size_t(r));
-    }
-    close(fd);
+        freeaddrinfo(res);
+        if (fd < 0)
+            throw TransientNetworkError("cannot connect to " + host + ":" +
+                                        port_str);
 
-    return parse_http_response(raw);
+        std::ostringstream req;
+        req << "POST " << path << " HTTP/1.1\r\n";
+        req << "Host: " << host;
+        if (port != 80) req << ":" << port;
+        req << "\r\n";
+        req << "User-Agent: aas-sign/1.0\r\n";
+        req << "Content-Type: " << content_type << "\r\n";
+        if (!accept.empty())
+            req << "Accept: " << accept << "\r\n";
+        req << "Content-Length: " << body.size() << "\r\n";
+        req << "Connection: close\r\n\r\n";
+        std::string header = req.str();
+
+        auto write_n = [&](const uint8_t *p, size_t n) {
+            while (n > 0) {
+                ssize_t w = write(fd, p, n);
+                if (w <= 0) {
+                    close(fd);
+                    throw TransientNetworkError("write to TSA failed");
+                }
+                p += w;
+                n -= size_t(w);
+            }
+        };
+        write_n(reinterpret_cast<const uint8_t *>(header.data()), header.size());
+        if (!body.empty())
+            write_n(body.data(), body.size());
+
+        std::string raw;
+        char buf[4096];
+        for (;;) {
+            ssize_t r = read(fd, buf, sizeof(buf));
+            if (r < 0) {
+                close(fd);
+                throw TransientNetworkError("read from TSA failed");
+            }
+            if (r == 0) break;
+            raw.append(buf, size_t(r));
+        }
+        close(fd);
+
+        return parse_http_response(raw);
+    });
 }
 
 // --- File I/O ---

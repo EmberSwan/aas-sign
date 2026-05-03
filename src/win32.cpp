@@ -275,8 +275,8 @@ static HttpResponse winhttp_request(const std::string &host,
     if (!conn) {
         DWORD err = GetLastError();
         WinHttpCloseHandle(session);
-        throw std::runtime_error("WinHttpConnect " + host + ": " +
-                                 win_error(err));
+        throw TransientNetworkError("WinHttpConnect " + host + ": " +
+                                    win_error(err));
     }
 
     auto wpath = to_wide(path);
@@ -314,8 +314,8 @@ static HttpResponse winhttp_request(const std::string &host,
         WinHttpCloseHandle(req);
         WinHttpCloseHandle(conn);
         WinHttpCloseHandle(session);
-        throw std::runtime_error("WinHttp request to " + host + ": " +
-                                 win_error(err));
+        throw TransientNetworkError("WinHttp request to " + host + ": " +
+                                    win_error(err));
     }
 
     DWORD status = 0, status_size = sizeof(status);
@@ -344,13 +344,17 @@ HttpResponse https_post(const std::string &host, const std::string &path,
                         const std::string &bearer_token,
                         const std::string &json_body)
 {
-    return winhttp_request(host, path, bearer_token, "POST", &json_body);
+    return retry_transient([&] {
+        return winhttp_request(host, path, bearer_token, "POST", &json_body);
+    });
 }
 
 HttpResponse https_get(const std::string &host, const std::string &path,
                        const std::string &bearer_token)
 {
-    return winhttp_request(host, path, bearer_token, "GET", nullptr);
+    return retry_transient([&] {
+        return winhttp_request(host, path, bearer_token, "GET", nullptr);
+    });
 }
 
 // Parse an https URL via WinHttpCrackUrl.  Populates host and
@@ -399,8 +403,8 @@ static HttpResponse winhttp_url_request(const std::string &url,
     if (!conn) {
         DWORD err = GetLastError();
         WinHttpCloseHandle(session);
-        throw std::runtime_error("WinHttpConnect " + url + ": " +
-                                 win_error(err));
+        throw TransientNetworkError("WinHttpConnect " + url + ": " +
+                                    win_error(err));
     }
 
     HINTERNET req = WinHttpOpenRequest(conn, method, wpath.c_str(),
@@ -437,8 +441,8 @@ static HttpResponse winhttp_url_request(const std::string &url,
         WinHttpCloseHandle(req);
         WinHttpCloseHandle(conn);
         WinHttpCloseHandle(session);
-        throw std::runtime_error("WinHttp request to " + url + ": " +
-                                 win_error(err));
+        throw TransientNetworkError("WinHttp request to " + url + ": " +
+                                    win_error(err));
     }
 
     DWORD status = 0, status_size = sizeof(status);
@@ -466,21 +470,27 @@ static HttpResponse winhttp_url_request(const std::string &url,
 HttpResponse https_get_url(const std::string &url,
                            const std::string &bearer_token)
 {
-    return winhttp_url_request(url, L"GET", &bearer_token, nullptr, nullptr);
+    return retry_transient([&] {
+        return winhttp_url_request(url, L"GET", &bearer_token,
+                                   nullptr, nullptr);
+    });
 }
 
 HttpResponse https_post_url(const std::string &url,
                             const std::string &content_type,
                             const std::string &body)
 {
-    return winhttp_url_request(url, L"POST", nullptr, &content_type, &body);
+    return retry_transient([&] {
+        return winhttp_url_request(url, L"POST", nullptr,
+                                   &content_type, &body);
+    });
 }
 
-HttpResponse http_post_binary(const std::string &host, int port,
-                              const std::string &path,
-                              const std::string &content_type,
-                              const std::string &accept,
-                              const std::vector<uint8_t> &body)
+static HttpResponse http_post_binary_once(const std::string &host, int port,
+                                          const std::string &path,
+                                          const std::string &content_type,
+                                          const std::string &accept,
+                                          const std::vector<uint8_t> &body)
 {
     HINTERNET session = WinHttpOpen(L"aas-sign/1.0",
                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -495,9 +505,9 @@ HttpResponse http_post_binary(const std::string &host, int port,
     if (!conn) {
         DWORD err = GetLastError();
         WinHttpCloseHandle(session);
-        throw std::runtime_error("WinHttpConnect " + host + ":" +
-                                 std::to_string(port) + ": " +
-                                 win_error(err));
+        throw TransientNetworkError("WinHttpConnect " + host + ":" +
+                                    std::to_string(port) + ": " +
+                                    win_error(err));
     }
 
     auto wpath = to_wide(path);
@@ -533,9 +543,9 @@ HttpResponse http_post_binary(const std::string &host, int port,
         WinHttpCloseHandle(req);
         WinHttpCloseHandle(conn);
         WinHttpCloseHandle(session);
-        throw std::runtime_error("WinHttp TSA request to " + host + ":" +
-                                 std::to_string(port) + ": " +
-                                 win_error(err));
+        throw TransientNetworkError("WinHttp TSA request to " + host + ":" +
+                                    std::to_string(port) + ": " +
+                                    win_error(err));
     }
 
     DWORD status = 0, status_size = sizeof(status);
@@ -558,6 +568,18 @@ HttpResponse http_post_binary(const std::string &host, int port,
     WinHttpCloseHandle(session);
 
     return {static_cast<int>(status), response_body};
+}
+
+HttpResponse http_post_binary(const std::string &host, int port,
+                              const std::string &path,
+                              const std::string &content_type,
+                              const std::string &accept,
+                              const std::vector<uint8_t> &body)
+{
+    return retry_transient([&] {
+        return http_post_binary_once(host, port, path, content_type,
+                                     accept, body);
+    });
 }
 
 // --- File I/O ---
