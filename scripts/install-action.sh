@@ -41,13 +41,14 @@ case "${RUNNER_OS}" in
 esac
 
 base_url="https://github.com/${ACTION_REPOSITORY}/releases/download/${VERSION}"
+checksums_url="https://artifacts.emberswan.com/aas-sign/${VERSION}/sha256sums.txt"
 checksums="$(mktemp "${RUNNER_TEMP}/aas-sign-checksums.XXXXXX")"
 download="$(mktemp "${RUNNER_TEMP}/aas-sign-download.XXXXXX")"
 trap 'rm -f "${checksums}" "${download}"' EXIT
 
 echo "Installing aas-sign ${VERSION} from ${ACTION_REPOSITORY}"
 curl -fsSL --retry 3 --retry-all-errors \
-  -o "${checksums}" "${base_url}/sha256sums.txt"
+  -o "${checksums}" "${checksums_url}"
 curl -fsSL --retry 3 --retry-all-errors \
   -o "${download}" "${base_url}/${asset}"
 

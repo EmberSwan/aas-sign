@@ -41,6 +41,7 @@ done
 
 [ -n "${output}" ] && [ -n "${url}" ]
 case "${url}" in
+  https://artifacts.emberswan.com/aas-sign/v9.8.7/sha256sums.txt) ;;
   https://github.com/ExampleOrg/example-action/releases/download/v9.8.7/*) ;;
   *)
     echo "unexpected URL: ${url}" >&2
@@ -76,7 +77,7 @@ run_install Linux "${linux_temp}"
 cmp "${release_dir}/aas-sign-linux-x86_64" "${linux_temp}/aas-sign"
 grep -Fxq "${linux_temp}" "${linux_temp}/github-path"
 grep -Fxq \
-  'https://github.com/ExampleOrg/example-action/releases/download/v9.8.7/sha256sums.txt' \
+  'https://artifacts.emberswan.com/aas-sign/v9.8.7/sha256sums.txt' \
   "${linux_temp}/curl.log"
 grep -Fxq \
   'https://github.com/ExampleOrg/example-action/releases/download/v9.8.7/aas-sign-linux-x86_64' \

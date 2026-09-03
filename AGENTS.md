@@ -90,9 +90,12 @@ check.
 `action.yml` at the repo root is a composite GitHub Action published
 from this same repo.  Consumers reference it as
 `EmberSwan/aas-sign@<tag>`.  It downloads the pinned
-release binary for the runner OS, accepts a caller-supplied Azure token or
-uses aas-sign's built-in GitHub OIDC exchange, and invokes `aas-sign` with a
-multi-line `files:` input.  Asset naming convention:
+release binary for the runner OS, verifies it against the independently
+published `https://artifacts.emberswan.com/aas-sign/<tag>/sha256sums.txt`,
+accepts a caller-supplied Azure token or uses aas-sign's built-in GitHub OIDC
+exchange, and invokes `aas-sign` with a multi-line `files:` input.  Release
+checksums are uploaded to that immutable R2 path manually after publishing
+the GitHub release.  Asset naming convention:
 `aas-sign-{linux,windows}-x86_64[.exe]`.
 
 `.github/workflows/release.yml` builds the assets on a `v*` tag push,
