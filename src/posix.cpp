@@ -8,7 +8,11 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/error.h>
+#include <mbedtls/version.h>
 #include <mbedtls/x509_crt.h>
+#if defined(MBEDTLS_PSA_CRYPTO_C) || defined(MBEDTLS_PSA_CRYPTO_CLIENT)
+#include <psa/crypto.h>
+#endif
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -24,6 +28,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 
@@ -99,6 +104,48 @@ static std::string mbed_error(int ret)
     return buf;
 }
 
+static bool tls_wants_io(int ret)
+{
+    return ret == MBEDTLS_ERR_SSL_WANT_READ ||
+           ret == MBEDTLS_ERR_SSL_WANT_WRITE;
+}
+
+static bool tls_received_session_ticket(int ret)
+{
+#ifdef MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
+    // mbedTLS 3.6.0 surfaced received TLS 1.3 session tickets to the caller.
+    // Later 3.6 releases ignore them internally by default.
+    return ret == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET;
+#else
+    (void)ret;
+    return false;
+#endif
+}
+
+static void ensure_psa_crypto()
+{
+#if defined(MBEDTLS_PSA_CRYPTO_C) || defined(MBEDTLS_PSA_CRYPTO_CLIENT)
+    static std::once_flag once;
+    std::call_once(once, [] {
+        psa_status_t status = psa_crypto_init();
+        if (status != PSA_SUCCESS)
+            throw std::runtime_error(
+                "psa_crypto_init failed (PSA status " +
+                std::to_string(status) + ")");
+    });
+#endif
+}
+
+// Some system mbedTLS packages disable threading, and releases before 3.6 do
+// not apply their threading support to all PSA global state.  Keep those
+// builds safe by allowing only one complete TLS connection at a time.  The
+// bundled build enables mbedTLS's current pthread support instead.
+#if !defined(MBEDTLS_THREADING_C) || \
+    MBEDTLS_VERSION_NUMBER < 0x03060000
+#define AAS_SIGN_SERIALIZE_MBEDTLS
+static std::mutex g_mbedtls_mutex;
+#endif
+
 // TLS verification mode.  Defaults to verifying against the system CA
 // bundle.  --insecure flips this off for the rest of the process via
 // platform::tls_disable_verification().  Set once at startup, before
@@ -147,6 +194,10 @@ static std::string find_ca_bundle()
 }
 
 struct TlsConnection {
+#ifdef AAS_SIGN_SERIALIZE_MBEDTLS
+    // Declared first so it remains held while all mbedTLS contexts are freed.
+    std::unique_lock<std::mutex> mbedtls_lock{g_mbedtls_mutex};
+#endif
     mbedtls_net_context server_fd;
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
@@ -156,6 +207,8 @@ struct TlsConnection {
 
     TlsConnection(const std::string &host)
     {
+        ensure_psa_crypto();
+
         mbedtls_net_init(&server_fd);
         mbedtls_ssl_init(&ssl);
         mbedtls_ssl_config_init(&conf);
@@ -163,72 +216,88 @@ struct TlsConnection {
         mbedtls_entropy_init(&entropy);
         mbedtls_x509_crt_init(&cacert);
 
-        int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func,
-                                        &entropy, nullptr, 0);
-        if (ret != 0)
-            throw std::runtime_error("mbedtls_ctr_drbg_seed: " +
-                                     mbed_error(ret));
+        try {
+            int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func,
+                                            &entropy, nullptr, 0);
+            if (ret != 0)
+                throw std::runtime_error("mbedtls_ctr_drbg_seed: " +
+                                         mbed_error(ret));
 
-        ret = mbedtls_net_connect(&server_fd, host.c_str(), "443",
-                                  MBEDTLS_NET_PROTO_TCP);
-        if (ret != 0)
-            throw TransientNetworkError("connect to " + host + ":443: " +
-                                        mbed_error(ret));
+            ret = mbedtls_net_connect(&server_fd, host.c_str(), "443",
+                                      MBEDTLS_NET_PROTO_TCP);
+            if (ret != 0)
+                throw TransientNetworkError(
+                    "connect to " + host + ":443: " + mbed_error(ret));
 
-        ret = mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
-                                          MBEDTLS_SSL_TRANSPORT_STREAM,
-                                          MBEDTLS_SSL_PRESET_DEFAULT);
-        if (ret != 0)
-            throw std::runtime_error("ssl_config_defaults: " +
-                                     mbed_error(ret));
+            ret = mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
+                                              MBEDTLS_SSL_TRANSPORT_STREAM,
+                                              MBEDTLS_SSL_PRESET_DEFAULT);
+            if (ret != 0)
+                throw std::runtime_error("ssl_config_defaults: " +
+                                         mbed_error(ret));
 
-        if (g_tls_insecure) {
-            mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
-        } else {
-            std::string bundle = find_ca_bundle();
-            if (bundle.empty())
-                throw std::runtime_error(
-                    "no CA certificate bundle found at any standard "
-                    "location; install ca-certificates, set "
-                    "SSL_CERT_FILE, or pass --insecure to skip "
-                    "TLS verification");
-            // Positive return = number of certs that failed to parse;
-            // we tolerate that as long as some certs loaded.  Negative
-            // = hard error.
-            ret = mbedtls_x509_crt_parse_file(&cacert, bundle.c_str());
-            if (ret < 0)
-                throw std::runtime_error(
-                    "failed to parse CA bundle " + bundle + ": " +
-                    mbed_error(ret));
-            mbedtls_ssl_conf_ca_chain(&conf, &cacert, nullptr);
-            mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-        }
-        mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+            if (g_tls_insecure) {
+                mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
+            } else {
+                std::string bundle = find_ca_bundle();
+                if (bundle.empty())
+                    throw std::runtime_error(
+                        "no CA certificate bundle found at any standard "
+                        "location; install ca-certificates, set "
+                        "SSL_CERT_FILE, or pass --insecure to skip "
+                        "TLS verification");
+                // Positive return = number of certs that failed to parse;
+                // we tolerate that as long as some certs loaded.  Negative
+                // = hard error.
+                ret = mbedtls_x509_crt_parse_file(&cacert, bundle.c_str());
+                if (ret < 0)
+                    throw std::runtime_error(
+                        "failed to parse CA bundle " + bundle + ": " +
+                        mbed_error(ret));
+                mbedtls_ssl_conf_ca_chain(&conf, &cacert, nullptr);
+                mbedtls_ssl_conf_authmode(&conf,
+                                          MBEDTLS_SSL_VERIFY_REQUIRED);
+            }
+            mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
 
-        ret = mbedtls_ssl_setup(&ssl, &conf);
-        if (ret != 0)
-            throw std::runtime_error("ssl_setup: " + mbed_error(ret));
+            ret = mbedtls_ssl_setup(&ssl, &conf);
+            if (ret != 0)
+                throw std::runtime_error("ssl_setup: " + mbed_error(ret));
 
-        // SNI + (when verifying) cert hostname check.
-        ret = mbedtls_ssl_set_hostname(&ssl, host.c_str());
-        if (ret != 0)
-            throw std::runtime_error("ssl_set_hostname: " +
-                                     mbed_error(ret));
+            // SNI + (when verifying) cert hostname check.
+            ret = mbedtls_ssl_set_hostname(&ssl, host.c_str());
+            if (ret != 0)
+                throw std::runtime_error("ssl_set_hostname: " +
+                                         mbed_error(ret));
 
-        mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send,
-                            mbedtls_net_recv, nullptr);
+            mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send,
+                                mbedtls_net_recv, nullptr);
 
-        while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
-            if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
-                ret != MBEDTLS_ERR_SSL_WANT_WRITE)
+            while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
+                if (tls_wants_io(ret) || tls_received_session_ticket(ret))
+                    continue;
                 throw TransientNetworkError("TLS handshake with " + host +
                                             ": " + mbed_error(ret));
+            }
+        } catch (...) {
+            free_contexts(false);
+            throw;
         }
     }
 
     ~TlsConnection()
     {
-        mbedtls_ssl_close_notify(&ssl);
+        free_contexts(true);
+    }
+
+    TlsConnection(const TlsConnection &) = delete;
+    TlsConnection &operator=(const TlsConnection &) = delete;
+
+private:
+    void free_contexts(bool notify) noexcept
+    {
+        if (notify)
+            mbedtls_ssl_close_notify(&ssl);
         mbedtls_net_free(&server_fd);
         mbedtls_ssl_free(&ssl);
         mbedtls_ssl_config_free(&conf);
@@ -237,14 +306,24 @@ struct TlsConnection {
         mbedtls_x509_crt_free(&cacert);
     }
 
+public:
     void write_all(const std::string &data)
     {
         const uint8_t *p = reinterpret_cast<const uint8_t *>(data.data());
         size_t remaining = data.size();
         while (remaining > 0) {
             int ret = mbedtls_ssl_write(&ssl, p, remaining);
+            if (ret == 0)
+                throw TransientNetworkError(
+                    "ssl_write: connection closed without progress");
             if (ret < 0) {
-                if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+                if (tls_wants_io(ret)) continue;
+                // Retrying the same write after a 3.6.0 session-ticket
+                // notification can duplicate a partially flushed TLS record.
+                // Reconnect and retry the complete idempotent HTTP operation.
+                if (tls_received_session_ticket(ret))
+                    throw TransientNetworkError(
+                        "ssl_write interrupted by TLS session ticket");
                 throw TransientNetworkError("ssl_write: " + mbed_error(ret));
             }
             p += ret;
@@ -258,7 +337,8 @@ struct TlsConnection {
         uint8_t buf[4096];
         for (;;) {
             int ret = mbedtls_ssl_read(&ssl, buf, sizeof(buf));
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ) continue;
+            if (tls_wants_io(ret) || tls_received_session_ticket(ret))
+                continue;
             if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == 0)
                 break;
             if (ret < 0)

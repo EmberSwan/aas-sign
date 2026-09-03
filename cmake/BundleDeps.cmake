@@ -15,8 +15,8 @@ endif()
 set(JSON_URL  "https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz")
 set(JSON_HASH "d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d")
 
-set(MBEDTLS_URL  "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.2/mbedtls-3.6.2.tar.bz2")
-set(MBEDTLS_HASH "8b54fb9bcf4d5a7078028e0520acddefb7900b3e66fec7f7175bb5b7d85ccdca")
+set(MBEDTLS_URL  "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2")
+set(MBEDTLS_HASH "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6")
 
 function(bundle_dep name url hash)
   set(dest "${DEPS_DIR}/${name}")

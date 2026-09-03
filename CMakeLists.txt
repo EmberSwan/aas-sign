@@ -50,10 +50,17 @@ else()
     set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
     set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
     set(MBEDTLS_AS_SUBPROJECT ON CACHE BOOL "" FORCE)
-    # mbedTLS 3.6.2 enables -Werror by default and newer clang (>=19)
+    # mbedTLS enables -Werror by default and newer clang (>=19)
     # adds diagnostics that trip it.  We don't need mbedTLS to be that
     # strict for our consumer-level use.
     set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+    # TLS 1.3 uses the global PSA keystore.  aas-sign performs HTTPS requests
+    # from multiple signing workers, so the bundled library must protect that
+    # state with its pthread threading implementation.
+    set(MBEDTLS_USER_CONFIG_FILE
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MbedTLSUserConfig.h"
+        CACHE FILEPATH "" FORCE)
+    set(LINK_WITH_PTHREAD ON CACHE BOOL "" FORCE)
     if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/deps/mbedtls")
       set(FETCHCONTENT_SOURCE_DIR_MBEDTLS
           "${CMAKE_CURRENT_SOURCE_DIR}/deps/mbedtls")
@@ -62,8 +69,8 @@ else()
       set(_mbedtls_origin "downloaded")
     endif()
     FetchContent_Declare(mbedtls
-      URL                     https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.2/mbedtls-3.6.2.tar.bz2
-      URL_HASH                SHA256=8b54fb9bcf4d5a7078028e0520acddefb7900b3e66fec7f7175bb5b7d85ccdca
+      URL                     https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2
+      URL_HASH                SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
       DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
     FetchContent_MakeAvailable(mbedtls)
     message(STATUS "mbedTLS: ${_mbedtls_origin}")
