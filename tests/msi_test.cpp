@@ -29,6 +29,12 @@ void put32(uint8_t *p, uint32_t v)
         p[i] = uint8_t(v >> (8 * i));
 }
 
+uint32_t get32(const uint8_t *p)
+{
+    return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 |
+           uint32_t(p[3]) << 24;
+}
+
 std::string hex(const std::array<uint8_t, 32> &value)
 {
     std::ostringstream out;
@@ -192,6 +198,52 @@ void check_round_trip(uint16_t major,
     }
 }
 
+void check_stale_directory_sector_count(uint16_t major)
+{
+    TemporaryFile file("/tmp/aas-sign-msi-test-" +
+                       std::to_string(::getpid()) + "-stale-dir-v" +
+                       std::to_string(major) + ".msi");
+    auto input = empty_compound_file(major);
+    // The actual directory chain has one sector.  For v3 this field is
+    // unused and must normally be zero; for v4 it is an incorrect count.
+    put32(input.data() + 40, 2);
+    platform::write_whole_file(file.path, input.data(), input.size());
+
+    {
+        MsiFile msi(file.path);
+        msi.inject_signature({0x30, 0x00}, {});
+    }
+
+    auto rewritten = read_whole_file(file.path);
+    expect(get32(rewritten.data() + 40) == (major == 4 ? 1U : 0U),
+           "CFB v" + std::to_string(major) +
+               " stale directory count is accepted and canonicalized");
+    MsiFile reparsed(file.path);
+}
+
+void check_v3_uninitialized_stream_size_high_word()
+{
+    TemporaryFile file("/tmp/aas-sign-msi-test-" +
+                       std::to_string(::getpid()) + "-v3-size-high.msi");
+    auto input = empty_compound_file(3);
+    constexpr size_t root_stream_size_high = 512 + 124;
+    put32(input.data() + root_stream_size_high, 0xdeadbeef);
+    platform::write_whole_file(file.path, input.data(), input.size());
+
+    {
+        MsiFile msi(file.path);
+        msi.inject_signature({0x30, 0x00}, {});
+    }
+
+    auto rewritten = read_whole_file(file.path);
+    auto dir_start = get32(rewritten.data() + 48);
+    auto root_offset = (size_t(dir_start) + 1) * 512;
+    expect(get32(rewritten.data() + root_offset + 124) == 0,
+           "CFB v3 uninitialized stream-size high word is ignored and "
+           "canonicalized");
+    MsiFile reparsed(file.path);
+}
+
 void check_real_msi_seed()
 {
     const std::array<uint8_t, 32> basic = {
@@ -255,6 +307,9 @@ int main()
     try {
         check_round_trip(3, basic, enhanced);
         check_round_trip(4, basic, enhanced);
+        check_stale_directory_sector_count(3);
+        check_stale_directory_sector_count(4);
+        check_v3_uninitialized_stream_size_high_word();
         check_real_msi_seed();
 
         TemporaryFile malformed("/tmp/aas-sign-msi-test-" +

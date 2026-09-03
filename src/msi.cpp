@@ -268,10 +268,11 @@ MsiFile::MsiFile(const std::string &path) : file_(path)
     };
     uint32_t dir_start = get32(file.data() + 48);
     auto dir_chain = chain(dir_start, fat);
-    uint32_t declared_dir_sectors = get32(file.data() + 40);
-    if ((major_ == 3 && declared_dir_sectors != 0) ||
-        (major_ == 4 && declared_dir_sectors != dir_chain.size()))
-        throw std::runtime_error("invalid MSI directory-sector count");
+    // The field is unsupported in v3 and redundant with the FAT directory
+    // chain in v4.  Although MS-CFB requires a canonical value, real-world
+    // files can contain a stale count.  Ignore it while reading: chain() and
+    // regular() bound the chain, detect cycles, and reject physical overlap.
+    // serialize() restores the canonical count.
     uint64_t dir_size = uint64_t(dir_chain.size()) * sector_size_;
     auto dirbytes = regular(dir_start, dir_size, "directory");
     if (dirbytes.size() < 128 || dirbytes.size() % 128)
@@ -298,8 +299,8 @@ MsiFile::MsiFile(const std::string &path) : file_(path)
         e.start = get32(e.raw.data() + 116);
         e.size = get64(e.raw.data() + 120);
         if (major_ == 3) {
-            if (e.size >> 32)
-                throw std::runtime_error("invalid MSI v3 stream size");
+            // Older CFB implementations left the high DWORD uninitialized.
+            // MS-CFB requires current v3 readers to ignore it.
             e.size = uint32_t(e.size);
             if (e.size > V3_MAX_STREAM_SIZE)
                 throw std::runtime_error("MSI v3 stream exceeds 2 GiB");
