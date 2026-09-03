@@ -56,35 +56,9 @@ runs:
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
-      run: |
-        set -euo pipefail
-
-        if [ "${RUNNER_ARCH}" != "X64" ]; then
-          echo "::error::unsupported RUNNER_ARCH: ${RUNNER_ARCH}"
-          exit 1
-        fi
-
-        case "${RUNNER_OS}" in
-          Linux)
-            asset=aas-sign-linux-x86_64
-            exe=aas-sign
-            ;;
-          Windows)
-            asset=aas-sign-windows-x86_64.exe
-            exe=aas-sign.exe
-            ;;
-          *)
-            echo "::error::unsupported RUNNER_OS: ${RUNNER_OS}"
-            exit 1
-            ;;
-        esac
-
-        url="https://github.com/skeeto/aas-sign/releases/download/${VERSION}/${asset}"
-        dest="${RUNNER_TEMP}/${exe}"
-        echo "Installing aas-sign ${VERSION} from ${url}"
-        curl -fsSL --retry 3 --retry-all-errors -o "${dest}" "${url}"
-        chmod +x "${dest}" || true   # no-op on Windows
-        echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/install-action.sh"
 
     - name: Sign
       shell: bash

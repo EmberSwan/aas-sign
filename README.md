@@ -134,7 +134,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - ...                         # your build steps here
-      - uses: skeeto/aas-sign@v1.2.0
+      - uses: EmberSwan/aas-sign@v1.2.0
         with:
           endpoint:  eus.codesigning.azure.net
           account:   myaccount

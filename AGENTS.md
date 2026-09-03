@@ -89,7 +89,7 @@ check.
 
 `action.yml` at the repo root is a composite GitHub Action published
 from this same repo.  Consumers reference it as
-`skeeto/aas-sign@<tag>`.  It downloads the pinned
+`EmberSwan/aas-sign@<tag>`.  It downloads the pinned
 release binary for the runner OS, accepts a caller-supplied Azure token or
 uses aas-sign's built-in GitHub OIDC exchange, and invokes `aas-sign` with a
 multi-line `files:` input.  Asset naming convention:

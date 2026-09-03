@@ -166,6 +166,10 @@ if(BUILD_TESTING AND NOT WIN32)
     AAS_SIGN_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   aas_sign_link_posix_test(cms_test)
   add_test(NAME cms_test COMMAND cms_test)
+
+  add_test(NAME action_install_test
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/action_install_test.sh"
+                 "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 
 if(BUILD_TESTING AND AAS_SIGN_FUZZ)
