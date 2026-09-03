@@ -1,9 +1,10 @@
 # aas-sign: Azure Artifact Signing utility
 
-C++20 utility to code-sign PE images (EXE, DLL) via [Azure Artifact
+C++20 utility to code-sign PE images (EXE, DLL) and Windows Installer
+packages (MSI) via [Azure Artifact
 Signing][aas] with no local, private keys. It computes the Authenticode
 hash, sends it to Azure, timestamps the returned signature against an
-RFC 3161 TSA, and injects the signed CMS into the PE.
+RFC 3161 TSA, and injects the signed CMS into the input file.
 
 ## Building
 
@@ -20,7 +21,7 @@ is fetched via FetchContent for TLS and SHA-256.
 ### Quick start
 
     $ aas-sign login <region>:<account>:<profile>
-    $ aas-sign sign myapp.exe
+    $ aas-sign sign myapp.exe installer.msi
 
 The signer tuple has three fields separated by colons, in
 less-to-more-specific order.  `<region>` is the short region slug
@@ -66,9 +67,10 @@ path to take when the three values come from separate variables
                     [--token <bearer-token>] \
                     [--oidc-client-id <ID> --oidc-tenant-id <ID>] \
                     [--timestamp-url <url> | --no-timestamp] \
+                    [--msi-dse] \
                     [--max-parallel <N>] \
                     [--dump-cms <path>] \
-                    <file.exe|file.dll> [<file.exe|file.dll> ...]
+                    <file.exe|file.dll|file.msi> [FILE ...]
 
     $ aas-sign login [<region>:<account>:<profile>] \
                      [--tenant <tenant>] [--client-id <id>]
@@ -91,6 +93,11 @@ timestamped signature remains verifiable indefinitely.
 Use `--timestamp-url` to point at a different RFC 3161 TSA, or
 `--no-timestamp` to skip timestamping entirely (not recommended for
 production artifacts).
+
+MSI files receive the standard `DigitalSignature` stream by default.
+Pass `--msi-dse` to also add `MsiDigitalSignatureEx`, which covers MSI
+compound-file metadata.  The option has no effect on PE inputs, so PE and
+MSI files may be signed together.
 
 `--dump-cms PATH` writes the raw DER-encoded CMS blob to a file for
 inspection (`openssl asn1parse -inform DER -in PATH`).  Only supported
@@ -127,17 +134,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - ...                         # your build steps here
-      - uses: skeeto/aas-sign@v1.1.0
+      - uses: skeeto/aas-sign@v1.2.0
         with:
           endpoint:  eus.codesigning.azure.net
           account:   myaccount
           profile:   myprofile
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          msi-dse: true
           files: |
             dist/myapp.exe
             dist/mylib.dll
-            dist/installer.exe
+            dist/installer.msi
 ```
 
 The Azure app registration for `client-id` must have a
@@ -161,9 +169,10 @@ Inputs:
 | `client-id`     | see note | —                                            | Azure app ID for OIDC                  |
 | `tenant-id`     | see note | —                                            | Azure tenant for OIDC                  |
 | `token`         | see note | —                                            | Pre-minted bearer (alternative to OIDC)|
-| `version`       | no       | `v1.1.0`                                     | aas-sign release to install            |
+| `version`       | no       | `v1.2.0`                                     | aas-sign release to install            |
 | `timestamp-url` | no       | Microsoft ACS                                | Override RFC 3161 TSA                  |
 | `no-timestamp`  | no       | `false`                                      | Set `"true"` to skip timestamping      |
+| `msi-dse`       | no       | `false`                                      | Add enhanced MSI metadata signature    |
 | `max-parallel`  | no       | 8                                            | Concurrent sign operations             |
 
 Either provide `client-id` + `tenant-id` (preferred — no extra setup
@@ -215,15 +224,15 @@ runner is used.  There is no macOS build — build from source if you
 need one.
 
 The release assets are:
+
 - `aas-sign-linux-x86_64`
 - `aas-sign-windows-x86_64.exe` (Authenticode-signed by the tool itself)
 - `sha256sums.txt`
 
 ## How it works
 
-1. Parse the PE and compute its Authenticode SHA-256 hash (excluding the
-   checksum field, certificate table directory entry, and any existing
-   signature).
+1. Parse the PE or MSI and compute its format-specific Authenticode SHA-256
+   hash, excluding the embedded signature data.
 2. Build the Authenticode `SpcIndirectDataContent` and CMS authenticated
    attributes (contentType, messageDigest, SPC_STATEMENT_TYPE), sorted in
    DER canonical order.
@@ -233,17 +242,18 @@ The release assets are:
 5. Assemble a CMS `SignedData` (version 1) `ContentInfo` with the Azure
    signature, the cert chain, and the timestamp token embedded as an
    unsigned attribute in the SignerInfo.
-6. Wrap it in a `WIN_CERTIFICATE`, append to the PE, update the data
-   directory, and recompute the PE checksum.
+6. Wrap it in a PE `WIN_CERTIFICATE`, or place it in the MSI
+   `DigitalSignature` stream (plus `MsiDigitalSignatureEx` when requested).
 
 ## Verifying
 
 On Linux/macOS:
 
     $ osslsigncode verify myapp.exe
+    $ osslsigncode verify installer.msi
 
 On Windows: right-click the file → Properties → Digital Signatures, or
-`signtool verify /pa myapp.exe`.
+run `signtool verify /pa myapp.exe` (or pass the MSI path).
 
 
 [aas]: https://learn.microsoft.com/en-us/azure/trusted-signing/

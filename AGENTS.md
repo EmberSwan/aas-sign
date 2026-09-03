@@ -2,12 +2,13 @@
 
 ## Overview
 
-aas-sign is a C++ command-line tool that signs PE images (EXE, DLL) using
-Azure Artifact Signing (formerly Trusted Signing). It does no local
-cryptographic signing -- it computes an Authenticode hash, sends it to
-Azure's REST API, assembles the returned signature into a CMS structure,
-optionally attaches an RFC 3161 timestamp, and injects the result into the
-PE.
+aas-sign is a C++ command-line tool that signs PE images (EXE, DLL) and
+Windows Installer packages (MSI) using Azure Artifact Signing (formerly
+Trusted Signing). It does no local cryptographic signing -- it computes the
+format-specific Authenticode hash, sends it to Azure's REST API, assembles
+the returned signature into a CMS structure, optionally attaches an RFC
+3161 timestamp, and injects the result into the PE certificate table or MSI
+signature stream.
 
 ## Build
 
@@ -46,7 +47,7 @@ with the `FetchContent_Declare` entries in the top-level
 
 ## Fuzzing
 
-Hand-rolled byte parsers (`pe.cpp`, `x509.cpp`, `tsa.cpp`) have
+Hand-rolled byte parsers (`pe.cpp`, `msi.cpp`, `x509.cpp`, `tsa.cpp`) have
 libFuzzer harnesses under `fuzz/`.  Not built by default.  Clang
 only (libFuzzer ships with it), POSIX (Linux + macOS).  Applies
 ASan + UBSan and the matching stdlib debug mode
@@ -57,8 +58,10 @@ libc++):
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
     cmake --build build-fuzz
     ./build-fuzz/fuzz_pe -dict=fuzz/pe.dict -max_total_time=60 fuzz/corpus/pe/
+    ./build-fuzz/fuzz_msi -dict=fuzz/msi.dict -max_len=16777216 \
+        -max_total_time=60 fuzz/corpus/msi/
 
-Targets: `fuzz_pe`, `fuzz_x509_cert_id`, `fuzz_x509_split_certs`,
+Targets: `fuzz_pe`, `fuzz_msi`, `fuzz_x509_cert_id`, `fuzz_x509_split_certs`,
 `fuzz_der_tlv`, `fuzz_tsa_parse`.  Each harness catches
 `std::exception` so the rejection path is not a finding; libFuzzer
 only flags sanitizer fires and real crashes.  We assume mbedTLS and
@@ -69,25 +72,27 @@ Seed corpora and dictionaries live next to the harnesses:
 | harness | seeds | dict |
 |---|---|---|
 | `fuzz_pe` | `fuzz/corpus/pe/` (minimal PE32 + PE32+ stubs) | `fuzz/pe.dict` |
+| `fuzz_msi` | `fuzz/corpus/msi/` (minimal unsigned MSI/CFB) | `fuzz/msi.dict` |
 | `fuzz_x509_cert_id` | `fuzz/corpus/x509_cert_id/` (self-signed DER cert) | `fuzz/der.dict` |
 | `fuzz_x509_split_certs` | `fuzz/corpus/x509_split_certs/` | `fuzz/der.dict` |
 | `fuzz_der_tlv` | — | `fuzz/der.dict` |
 | `fuzz_tsa_parse` | — | `fuzz/der.dict` |
 
-Without the seed corpus, `fuzz_pe` burns most of its budget failing
-the MZ/PE signature checks -- the provided stubs pass the
-constructor and land the fuzzer inside `authenticode_hash()`.  Pass
-the matching dict + corpus every run so mutations preserve the
-magic bytes our parsers check.
+Without their seed corpora, `fuzz_pe` and `fuzz_msi` burn most of their
+budgets failing the MZ/PE and CFB signature/header checks.  The provided
+seeds pass each constructor and land the fuzzer inside
+`authenticode_hash()`.  Pass the matching dictionary and corpus every run
+so mutations preserve the magic bytes and structural values our parsers
+check.
 
 ## Distribution
 
 `action.yml` at the repo root is a composite GitHub Action published
 from this same repo.  Consumers reference it as
 `skeeto/aas-sign@<tag>`.  It downloads the pinned
-release binary for the runner OS, resolves an Azure token (either from
-the caller or via `az account get-access-token`), and invokes
-`aas-sign` with a multi-line `files:` input.  Asset naming convention:
+release binary for the runner OS, accepts a caller-supplied Azure token or
+uses aas-sign's built-in GitHub OIDC exchange, and invokes `aas-sign` with a
+multi-line `files:` input.  Asset naming convention:
 `aas-sign-{linux,windows}-x86_64[.exe]`.
 
 `.github/workflows/release.yml` builds the assets on a `v*` tag push,
@@ -98,10 +103,11 @@ release; bootstraps cleanly from the first tag.  No macOS build.
 ## Architecture
 
 ```
-main.cpp         CLI + subcommand dispatch + worker pool
+main.cpp         CLI + subcommand and PE/MSI dispatch + worker pool
 pe.cpp           PE parsing, Authenticode hash, checksum, signature injection
+msi.cpp          MSI/CFB parsing, SIP hash, signature-stream injection
 der.cpp          DER/ASN.1 encoding primitives (build-and-wrap, no parsing)
-cms.cpp          CMS/Authenticode structure assembly (SignedData v1)
+cms.cpp          PE/MSI CMS/Authenticode structure assembly (SignedData v1)
 x509.cpp         Minimal X.509 parser (issuer DN + serial, CMS cert splitting)
 azure.cpp        Azure Trusted Signing REST client (POST + poll loop)
 tsa.cpp          RFC 3161 TimeStampReq builder and TimeStampResp parser
@@ -157,14 +163,19 @@ to the platform API.
 
 ## Signing flow
 
-1. Parse PE, compute Authenticode SHA-256 (pe.cpp)
-2. Build SpcIndirectDataContent + authenticated attributes (cms.cpp)
+1. Detect and parse the PE or MSI; compute the format-specific Authenticode
+   SHA-256 (`pe.cpp` or `msi.cpp`).  Enhanced MSI signing also computes the
+   `MsiDigitalSignatureEx` metadata digest.
+2. Build SpcIndirectDataContent with `SpcPeImageData` or MSI `SpcSipInfo`,
+   plus authenticated attributes (cms.cpp)
 3. SHA-256 hash the authenticated attrs SET
 4. POST hash to Azure, poll for signature + cert chain (azure.cpp)
 5. Request RFC 3161 timestamp of the Azure signature (tsa.cpp, optional)
 6. Build CMS ContentInfo with SignedData v1, timestamp embedded as
    unsigned attr in SignerInfo (cms.cpp)
-7. Wrap in WIN_CERTIFICATE, inject into PE, recompute checksum (pe.cpp)
+7. For PE, wrap in WIN_CERTIFICATE, inject, and recompute the checksum.  For
+   MSI, write the CMS to `DigitalSignature` and optionally write the metadata
+   digest to `MsiDigitalSignatureEx`.
 
 ## Key details and gotchas
 
@@ -183,6 +194,15 @@ to the platform API.
   peHeaderOffset+88), certificate table data directory entry (8B), and
   existing cert table data.  Unsigned PEs are also padded to an 8-byte
   boundary in the digest.
+- **Authenticode MSI hash** traverses each compound-file storage in MSI SIP
+  name order, hashes stream contents recursively, appends storage CLSIDs,
+  and excludes the root `DigitalSignature` and `MsiDigitalSignatureEx`
+  streams.  Enhanced mode first hashes directory metadata, stores that
+  32-byte digest in `MsiDigitalSignatureEx`, and prepends it to the ordinary
+  MSI content digest.
+- **MSI CMS content** uses `SpcSipInfo` OID `1.3.6.1.4.1.311.2.1.30` and
+  MSI SIP UUID `{000c10f1-0000-0000-c000-000000000046}`.  Re-signing replaces
+  the root signature streams; basic mode removes an existing enhanced stream.
 - **messageDigest attribute** is SHA-256 of the *content* of the
   SpcIndirectDataContent SEQUENCE, not of the SEQUENCE itself (skip the
   tag + length header).  Getting this wrong produces a
@@ -230,9 +250,9 @@ to the platform API.
   endpoint returns a (server-cached) token.
 - **Concurrency**: `sign_one_file()` is called from worker threads
   (default 8, tunable via `--max-parallel`).  All signing primitives
-  (`PeFile`, `azure_sign`, `tsa_timestamp`, `cms_*`) are per-instance or
-  create fresh TLS/TCP connections per call, with no shared mutable
-  state.  Per-file stderr output is buffered via `FileLogger` and
+  (`PeFile`, `MsiFile`, `azure_sign`, `tsa_timestamp`, `cms_*`) are
+  per-instance or create fresh TLS/TCP connections per call, with no shared
+  mutable state.  Per-file stderr output is buffered via `FileLogger` and
   flushed as one block under a single mutex so concurrent file
   narratives don't interleave.  Single-file invocations bypass the
   worker pool entirely and write to `std::cerr` directly for identical

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(aas-sign VERSION 1.1.0 LANGUAGES CXX C)
+project(aas-sign VERSION 1.2.0 LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -84,6 +84,7 @@ add_executable(aas-sign
   src/der.cpp
   src/x509.cpp
   src/pe.cpp
+  src/msi.cpp
   src/azure.cpp
   src/cms.cpp
   src/tsa.cpp
@@ -126,4 +127,53 @@ option(AAS_SIGN_FUZZ "Build libFuzzer harnesses (Clang-only, POSIX)" OFF)
 if(AAS_SIGN_FUZZ)
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   include(Fuzzing)
+endif()
+
+include(CTest)
+if(BUILD_TESTING AND NOT WIN32)
+  function(aas_sign_link_posix_test target)
+    target_include_directories(${target} PRIVATE src)
+    target_compile_definitions(${target} PRIVATE AAS_SIGN_NO_MAIN)
+    target_link_libraries(${target} PRIVATE
+      nlohmann_json::nlohmann_json Threads::Threads)
+    if(DEPS STREQUAL "LOCAL")
+      target_link_libraries(${target} PRIVATE
+        MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto)
+    else()
+      target_include_directories(${target} PRIVATE
+        ${mbedtls_SOURCE_DIR}/include)
+      target_link_libraries(${target} PRIVATE mbedtls mbedx509 mbedcrypto)
+    endif()
+  endfunction()
+
+  add_executable(msi_test
+    tests/msi_test.cpp src/msi.cpp src/posix.cpp)
+  target_compile_definitions(msi_test PRIVATE
+    AAS_SIGN_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+  aas_sign_link_posix_test(msi_test)
+  add_test(NAME msi_test COMMAND msi_test)
+
+  add_executable(cms_test
+    tests/cms_test.cpp src/cms.cpp src/der.cpp src/x509.cpp src/posix.cpp)
+  target_compile_definitions(cms_test PRIVATE
+    AAS_SIGN_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+  aas_sign_link_posix_test(cms_test)
+  add_test(NAME cms_test COMMAND cms_test)
+endif()
+
+if(BUILD_TESTING AND AAS_SIGN_FUZZ)
+  set(_aas_fuzz_msi_corpus
+    "${CMAKE_CURRENT_BINARY_DIR}/fuzz-corpus/msi")
+  file(REMOVE_RECURSE "${_aas_fuzz_msi_corpus}")
+  file(MAKE_DIRECTORY "${_aas_fuzz_msi_corpus}")
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/msi/minimal-msi-v3.msi"
+    "${_aas_fuzz_msi_corpus}/minimal-msi-v3.msi" COPYONLY)
+  add_test(NAME fuzz_msi_smoke
+    COMMAND fuzz_msi
+      -runs=1000
+      -max_len=16777216
+      -dict=${CMAKE_CURRENT_SOURCE_DIR}/fuzz/msi.dict
+      ${_aas_fuzz_msi_corpus})
+  set_tests_properties(fuzz_msi_smoke PROPERTIES TIMEOUT 60)
 endif()

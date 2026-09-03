@@ -8,6 +8,7 @@
 static Bytes oid_signed_data()       { return der_oid("1.2.840.113549.1.7.2"); }
 static Bytes oid_spc_indirect_data() { return der_oid("1.3.6.1.4.1.311.2.1.4"); }
 static Bytes oid_spc_pe_image_data() { return der_oid("1.3.6.1.4.1.311.2.1.15"); }
+static Bytes oid_spc_sip_info()      { return der_oid("1.3.6.1.4.1.311.2.1.30"); }
 static Bytes oid_spc_statement_type(){ return der_oid("1.3.6.1.4.1.311.2.1.11"); }
 static Bytes oid_spc_individual()    { return der_oid("1.3.6.1.4.1.311.2.1.21"); }
 static Bytes oid_sha256()            { return der_oid("2.16.840.1.101.3.4.2.1"); }
@@ -40,17 +41,38 @@ static Bytes spc_pe_image_data()
     return Bytes(data, data + sizeof(data));
 }
 
-// Build SpcIndirectDataContent.
-static Bytes build_spc_indirect_data(const std::array<uint8_t, 32> &pe_hash)
+static Bytes spc_msi_sip_info()
 {
-    // SpcAttributeTypeAndOptionalValue: SEQUENCE { OID, SpcPeImageData }
-    auto pe_image_oid = oid_spc_pe_image_data();
-    auto pe_image = spc_pe_image_data();
-    auto spc_attr = der_sequence({&pe_image_oid, &pe_image});
+    // SpcSipInfo { 1, MSI SIP UUID, 0, 0, 0, 0, 0 }.
+    static const uint8_t uuid[] = {
+        0xf1, 0x10, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46
+    };
+    auto one = der_integer(1);
+    auto id = der_octet_string(uuid, sizeof(uuid));
+    auto z1 = der_integer(0);
+    auto z2 = der_integer(0);
+    auto z3 = der_integer(0);
+    auto z4 = der_integer(0);
+    auto z5 = der_integer(0);
+    return der_sequence({&one, &id, &z1, &z2, &z3, &z4, &z5});
+}
+
+// Build SpcIndirectDataContent.
+static Bytes build_spc_indirect_data(const std::array<uint8_t, 32> &file_hash,
+                                     AuthenticodeFormat format)
+{
+    Bytes data_oid = format == AuthenticodeFormat::Pe
+                         ? oid_spc_pe_image_data()
+                         : oid_spc_sip_info();
+    Bytes data_value = format == AuthenticodeFormat::Pe
+                           ? spc_pe_image_data()
+                           : spc_msi_sip_info();
+    auto spc_attr = der_sequence({&data_oid, &data_value});
 
     // DigestInfo: SEQUENCE { AlgorithmIdentifier, OCTET STRING hash }
     auto alg_id = sha256_alg_id();
-    auto hash_octets = der_octet_string(pe_hash.data(), pe_hash.size());
+    auto hash_octets = der_octet_string(file_hash.data(), file_hash.size());
     auto digest_info = der_sequence({&alg_id, &hash_octets});
 
     return der_sequence({&spc_attr, &digest_info});
@@ -90,18 +112,19 @@ static Bytes build_auth_attrs(const Bytes &spc_indirect_data)
 }
 
 std::array<uint8_t, 32> cms_auth_attrs_hash(
-    const std::array<uint8_t, 32> &pe_hash)
+    const std::array<uint8_t, 32> &file_hash, AuthenticodeFormat format)
 {
-    auto spc_idc = build_spc_indirect_data(pe_hash);
+    auto spc_idc = build_spc_indirect_data(file_hash, format);
     auto auth_attrs = build_auth_attrs(spc_idc);
     return platform::sha256(auth_attrs.data(), auth_attrs.size());
 }
 
 std::vector<uint8_t> cms_build_authenticode(
-    const std::array<uint8_t, 32> &pe_hash,
+    const std::array<uint8_t, 32> &file_hash,
     const std::vector<uint8_t> &signature,
     const std::vector<uint8_t> &certs_der,
-    const std::vector<uint8_t> &timestamp_token_der)
+    const std::vector<uint8_t> &timestamp_token_der,
+    AuthenticodeFormat format)
 {
     // Parse signing cert to get issuer + serial.
     auto certs = x509_split_certs(certs_der.data(), certs_der.size());
@@ -110,7 +133,7 @@ std::vector<uint8_t> cms_build_authenticode(
     auto cert_id = x509_cert_id(certs[0].data(), certs[0].size());
 
     // Build SpcIndirectDataContent.
-    auto spc_idc = build_spc_indirect_data(pe_hash);
+    auto spc_idc = build_spc_indirect_data(file_hash, format);
 
     // Build authenticated attributes (as SET, tag 0x31).
     auto auth_attrs_set = build_auth_attrs(spc_idc);

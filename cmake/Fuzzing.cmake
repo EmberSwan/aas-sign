@@ -103,3 +103,7 @@ aas_sign_add_fuzz_target(fuzz_tsa_parse
 aas_sign_add_fuzz_target(fuzz_pe
   fuzz/fuzz_pe.cpp
   src/pe.cpp src/posix.cpp)
+
+aas_sign_add_fuzz_target(fuzz_msi
+  fuzz/fuzz_msi.cpp
+  src/msi.cpp src/posix.cpp)

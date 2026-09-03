@@ -2,6 +2,7 @@
 #include "auth_laptop.hpp"
 #include "azure.hpp"
 #include "cms.hpp"
+#include "msi.hpp"
 #include "oidc.hpp"
 #include "pe.hpp"
 #include "platform.hpp"
@@ -12,10 +13,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -47,11 +50,11 @@ static void usage_full(const char *argv0)
         << "       " << argv0 << " config REGION:ACCOUNT:PROFILE\n"
         << "       " << argv0 << " --version | --help\n"
         << "\n"
-        << "Sign PE images (EXE, DLL) via Azure Artifact Signing "
-           "(Trusted Signing).\n"
+        << "Sign PE images (EXE, DLL) and MSI packages via Azure "
+           "Artifact Signing (Trusted Signing).\n"
         << "\n"
         << "Subcommands:\n"
-        << "  sign FILE ...        Sign one or more PE images.\n"
+        << "  sign FILE ...        Sign one or more PE images or MSI packages.\n"
         << "  login                Interactive browser login; caches a refresh\n"
         << "                       token under ${XDG_CONFIG_HOME:-~/.config}/\n"
         << "                       aas-sign (or %APPDATA%\\aas-sign on Windows).\n"
@@ -92,6 +95,7 @@ static void usage_full(const char *argv0)
         << "                       to skip.\n"
         << "  --no-timestamp       Skip timestamping.  Not recommended -- Azure\n"
         << "                       Trusted Signing certs are short-lived (days).\n"
+        << "  --msi-dse            Add the enhanced MSI metadata signature stream.\n"
         << "  --max-parallel N     Maximum concurrent sign operations when\n"
         << "                       signing multiple files.  Default: 8.\n"
         << "  --dump-cms FILE      Write raw CMS DER blob to FILE for debugging\n"
@@ -149,6 +153,7 @@ struct Config {
     std::string token;
     std::string timestamp_url;
     bool no_timestamp = false;
+    bool msi_dse = false;
     std::string dump_cms;  // valid only when signing a single file
     // OIDC (CI-only) mode: when --token/$AZURE_ACCESS_TOKEN aren't set
     // but both of these are, perform the GitHub-Actions OIDC flow to
@@ -232,18 +237,51 @@ static SignResult sign_one_file(const std::string &file, const Config &cfg,
     SignResult r;
     r.file = file;
     try {
-        // Open and validate PE.
-        PeFile pe(file);
-        log.line() << "PE format: "
-                   << (pe.is_pe32plus ? "PE32+" : "PE32") << '\n';
+        uint8_t magic[8];
+        {
+            platform::File probe(file);
+            probe.read_at(0, magic, sizeof(magic));
+        }
+        static const uint8_t cfb[] = {
+            0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1
+        };
+        bool is_msi = !std::memcmp(magic, cfb, sizeof(cfb));
+        std::string lower = file;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        bool msi_extension = lower.size() >= 4 &&
+                             lower.substr(lower.size() - 4) == ".msi";
+        if (is_msi && !msi_extension)
+            throw std::runtime_error(
+                "compound file is not a supported .msi package");
+        if (msi_extension && !is_msi)
+            throw std::runtime_error("not an MSI compound file");
+
+        std::unique_ptr<PeFile> pe;
+        std::unique_ptr<MsiFile> msi;
+        std::array<uint8_t, 32> file_hash;
+        std::vector<uint8_t> msi_metadata;
+        if (is_msi) {
+            msi = std::make_unique<MsiFile>(file);
+            auto digest = msi->authenticode_hash(cfg.msi_dse);
+            file_hash = digest.file;
+            msi_metadata = std::move(digest.metadata);
+            log.line() << "MSI format"
+                       << (cfg.msi_dse ? " (enhanced metadata signature)" : "")
+                       << '\n';
+        } else {
+            pe = std::make_unique<PeFile>(file);
+            file_hash = pe->authenticode_hash();
+            log.line() << "PE format: "
+                       << (pe->is_pe32plus ? "PE32+" : "PE32") << '\n';
+        }
 
         // Compute Authenticode hash.
-        auto pe_hash = pe.authenticode_hash();
         {
             auto ls = log.line();
             ls << "Authenticode SHA-256: ";
             char buf[3];
-            for (auto b : pe_hash) {
+            for (auto b : file_hash) {
                 std::snprintf(buf, sizeof(buf), "%02x", b);
                 ls << buf;
             }
@@ -251,7 +289,9 @@ static SignResult sign_one_file(const std::string &file, const Config &cfg,
         }
 
         // Compute SHA-256 of authenticated attributes.
-        auto attrs_hash = cms_auth_attrs_hash(pe_hash);
+        auto format = is_msi ? AuthenticodeFormat::Msi
+                             : AuthenticodeFormat::Pe;
+        auto attrs_hash = cms_auth_attrs_hash(file_hash, format);
 
         // Sign via Azure.
         log.line() << "Signing...\n";
@@ -270,11 +310,11 @@ static SignResult sign_one_file(const std::string &file, const Config &cfg,
                        << timestamp_token.size() << " bytes)\n";
         }
 
-        // Build CMS and inject into PE.
-        auto cms_der = cms_build_authenticode(pe_hash,
+        // Build CMS and inject into the target file.
+        auto cms_der = cms_build_authenticode(file_hash,
                                               sign_result.signature,
                                               sign_result.cert_chain_der,
-                                              timestamp_token);
+                                              timestamp_token, format);
 
         if (!cfg.dump_cms.empty()) {
             platform::write_whole_file(cfg.dump_cms, cms_der.data(),
@@ -285,7 +325,10 @@ static SignResult sign_one_file(const std::string &file, const Config &cfg,
 
         log.line() << "Injecting signature (" << cms_der.size()
                    << " bytes)...\n";
-        pe.inject_signature(cms_der);
+        if (msi)
+            msi->inject_signature(cms_der, msi_metadata);
+        else
+            pe->inject_signature(cms_der);
 
         log.line() << "Signed " << file << " successfully.\n";
         r.ok = true;
@@ -326,6 +369,8 @@ static int sign_main(int argc, char **argv)
             cfg.timestamp_url = argv[++i];
         else if (!strcmp(argv[i], "--no-timestamp"))
             cfg.no_timestamp = true;
+        else if (!strcmp(argv[i], "--msi-dse"))
+            cfg.msi_dse = true;
         else if (!strcmp(argv[i], "--max-parallel") && i + 1 < argc)
             max_parallel = std::max(1, atoi(argv[++i]));
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {

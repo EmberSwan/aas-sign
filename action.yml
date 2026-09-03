@@ -1,5 +1,5 @@
 name: aas-sign
-description: Sign PE images with Azure Artifact Signing (formerly Trusted Signing)
+description: Sign PE images and MSI packages with Azure Artifact Signing
 
 inputs:
   endpoint:
@@ -31,13 +31,17 @@ inputs:
   version:
     description: aas-sign release tag to install
     required: false
-    default: v0.3.0
+    default: v1.2.0
   timestamp-url:
     description: RFC 3161 TSA URL (overrides aas-sign's built-in default)
     required: false
     default: ""
   no-timestamp:
     description: Set to "true" to skip timestamping
+    required: false
+    default: "false"
+  msi-dse:
+    description: Set to "true" to add the enhanced MSI metadata signature
     required: false
     default: "false"
   max-parallel:
@@ -55,6 +59,11 @@ runs:
       run: |
         set -euo pipefail
 
+        if [ "${RUNNER_ARCH}" != "X64" ]; then
+          echo "::error::unsupported RUNNER_ARCH: ${RUNNER_ARCH}"
+          exit 1
+        fi
+
         case "${RUNNER_OS}" in
           Linux)
             asset=aas-sign-linux-x86_64
@@ -63,10 +72,6 @@ runs:
           Windows)
             asset=aas-sign-windows-x86_64.exe
             exe=aas-sign.exe
-            ;;
-          macOS)
-            asset=aas-sign-macos-universal
-            exe=aas-sign
             ;;
           *)
             echo "::error::unsupported RUNNER_OS: ${RUNNER_OS}"
@@ -93,6 +98,7 @@ runs:
         INPUT_TOKEN:         ${{ inputs.token }}
         INPUT_TIMESTAMP_URL: ${{ inputs.timestamp-url }}
         INPUT_NO_TIMESTAMP:  ${{ inputs.no-timestamp }}
+        INPUT_MSI_DSE:       ${{ inputs.msi-dse }}
         INPUT_MAX_PARALLEL:  ${{ inputs.max-parallel }}
       run: |
         set -euo pipefail
@@ -136,6 +142,9 @@ runs:
         fi
         if [ "${INPUT_NO_TIMESTAMP}" = "true" ]; then
           args+=(--no-timestamp)
+        fi
+        if [ "${INPUT_MSI_DSE}" = "true" ]; then
+          args+=(--msi-dse)
         fi
         if [ -n "${INPUT_MAX_PARALLEL}" ]; then
           args+=(--max-parallel "${INPUT_MAX_PARALLEL}")
