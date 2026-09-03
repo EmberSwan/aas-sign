@@ -101,9 +101,9 @@ jobs:
 
       - name: Self-sign Windows binary
         env:
-          ENDPOINT:         ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
-          ACCOUNT:          ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
-          PROFILE:          ${{ secrets.CERTIFICATE_PROFILE }}
+          ENDPOINT:         ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          ACCOUNT:          ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          PROFILE:          ${{ vars.CERTIFICATE_PROFILE }}
           AZURE_CLIENT_ID:  ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID:  ${{ secrets.AZURE_TENANT_ID }}
         run: |
