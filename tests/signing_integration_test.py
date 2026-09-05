@@ -76,7 +76,12 @@ with tempfile.TemporaryDirectory(prefix="aas signing test ") as directory:
         args = [COMPANION, 'verify', '-CAfile', cert, '-ignore-cdp', '-ignore-crl']
         if timestamp_ca:
             args += ['-TSA-CAfile', timestamp_ca]
-        return run(*args, '-in', path)
+        output = run(*args, '-in', path)
+        if timestamp_ca:
+            # osslsigncode can exit successfully after a timestamp trust failure
+            # when the code-signing certificate is still valid at the current time.
+            assert 'Timestamp Server Signature verification: ok' in output, output
+        return output
 
     originals = {}
     for ext, fixture in [('exe', 'unsigned.exe'), ('msi', 'unsigned.msi'), ('msix', 'unsigned.256appx')]:
