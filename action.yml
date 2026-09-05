@@ -1,6 +1,10 @@
 name: aas-sign
 description: Sign PE images, MSI installers, and MSIX packages and bundles with Azure Artifact Signing
 
+branding:
+  icon: award
+  color: orange
+
 inputs:
   endpoint:
     description: Azure Trusted Signing endpoint host (e.g. eus.codesigning.azure.net)
