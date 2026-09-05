@@ -19,7 +19,7 @@ class ReleaseAssetsTest(unittest.TestCase):
             upstream = root / "upstream"
             repo = root / "repo"
             upstream.mkdir(); repo.mkdir()
-            (repo / "CMakeLists.txt").write_text("project(aas-sign VERSION 1.3.0 LANGUAGES CXX C)\n")
+            (repo / "CMakeLists.txt").write_text("project(aas-sign VERSION 2.0.0 LANGUAGES CXX C)\n")
             def git(directory, *args):
                 return subprocess.check_output(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                                                 "-c", "protocol.file.allow=always", *args], cwd=directory,
@@ -32,24 +32,24 @@ class ReleaseAssetsTest(unittest.TestCase):
             git(repo, "add", "CMakeLists.txt")
             git(repo, "commit", "-am", "submodule")
             old = git(upstream, "rev-parse", "HEAD")
-            self.assertEqual(module.metadata(repo, "v1.3.0-rc.2+build.7")["version"], "1.3.0-rc.2+build.7")
-            data = module.metadata(repo, "v1.3.0-rc.2")
-            self.assertEqual(data["aas_windows"], "aas-sign-1.3.0-rc.2-windows-x86_64.exe")
+            self.assertEqual(module.metadata(repo, "v2.0.0-rc.2+build.7")["version"], "2.0.0-rc.2+build.7")
+            data = module.metadata(repo, "v2.0.0-rc.2")
+            self.assertEqual(data["aas_windows"], "aas-sign-2.0.0-rc.2-windows-x86_64.exe")
             self.assertEqual(data["ossl_linux"], f"osslsigncode-{old[:8]}-linux-x86_64")
             (upstream / "source").write_text("two")
             git(upstream, "commit", "-am", "second")
             checkout = repo / "modules/osslsigncode"
             git(checkout, "pull")
             with self.assertRaisesRegex(ValueError, "differs"):
-                module.metadata(repo, "1.3.0")
+                module.metadata(repo, "2.0.0")
             git(repo, "add", "modules/osslsigncode"); git(repo, "commit", "-m", "update")
             new = git(upstream, "rev-parse", "HEAD")
-            self.assertEqual(module.metadata(repo, "1.3.0")["osslsigncode_revision"], new)
+            self.assertEqual(module.metadata(repo, "2.0.0")["osslsigncode_revision"], new)
             (checkout / "untracked").write_text("dirty")
             with self.assertRaisesRegex(ValueError, "dirty"):
-                module.metadata(repo, "1.3.0")
-            self.assertEqual(module.metadata(repo, "1.3.0", False)["version"], "1.3.0")
-            for bad in ("v", "latest", "../v1.3.0", "v1.3.0/evil", "v1.3", "v1.3.1"):
+                module.metadata(repo, "2.0.0")
+            self.assertEqual(module.metadata(repo, "2.0.0", False)["version"], "2.0.0")
+            for bad in ("v", "latest", "../v2.0.0", "v2.0.0/evil", "v2.0", "v2.0.1", "v1.3.0"):
                 with self.assertRaises(ValueError):
                     module.metadata(repo, bad, False)
 

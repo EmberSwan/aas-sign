@@ -200,7 +200,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - ...                         # your build steps here
-      - uses: EmberSwan/aas-sign@v1.3.0
+      - uses: EmberSwan/aas-sign@v2.0.0
         with:
           endpoint:  eus.codesigning.azure.net
           account:   myaccount
@@ -237,7 +237,7 @@ Inputs:
 | `client-id`     | see note | —                                            | Azure app ID for OIDC                  |
 | `tenant-id`     | see note | —                                            | Azure tenant for OIDC                  |
 | `token`         | see note | —                                            | Pre-minted bearer (alternative to OIDC)|
-| `version`       | no       | `v1.3.0`                                     | aas-sign release to install            |
+| `version`       | no       | `v2.0.0`                                     | aas-sign release to install            |
 | `timestamp-url` | no       | Microsoft ACS                                | Override RFC 3161 TSA                  |
 | `no-timestamp`  | no       | `false`                                      | Set `"true"` to skip timestamping      |
 | `msi-dse`       | no       | `false`                                      | Add enhanced MSI metadata signature    |
@@ -288,13 +288,13 @@ Linux releases use static third-party libraries on top of dynamic glibc
 MinGW; osslsigncode is built with MSVC and static dependencies on Windows.
 There is no macOS release asset.
 
-For a release tagged `v1.3.0`, the assets include:
+For a release tagged `v2.0.0`, the assets include:
 
-- `aas-sign-1.3.0-linux-x86_64`
-- `aas-sign-1.3.0-windows-x86_64.exe`
+- `aas-sign-2.0.0-linux-x86_64`
+- `aas-sign-2.0.0-windows-x86_64.exe`
 - `osslsigncode-<short-sha>-linux-x86_64`
 - `osslsigncode-<short-sha>-windows-x86_64.exe`
-- `aas-sign-1.3.0.tar.gz`, provenance/third-party notices, and `sha256sums.txt`
+- `aas-sign-2.0.0.tar.gz`, provenance/third-party notices, and `sha256sums.txt`
 
 The submodule gitlink alone pins osslsigncode. Updating it changes the derived
 asset names; the action discovers the companion name from the independent

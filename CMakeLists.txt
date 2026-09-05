@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(aas-sign VERSION 1.3.0 LANGUAGES CXX C)
+project(aas-sign VERSION 2.0.0 LANGUAGES CXX C)
 # Release labels preserve prerelease/build suffixes while numeric resources use
 # the project's version. Refuse accidental tags for a different project version.
 set(AAS_SIGN_RELEASE_VERSION "${PROJECT_VERSION}" CACHE STRING "Release version label (optional leading v)")
