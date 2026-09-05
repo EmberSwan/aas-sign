@@ -3,12 +3,17 @@
 #include "platform.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <stdexcept>
 
 namespace {
+std::string fixture_source() {
+    const auto *source = std::getenv("AAS_SIGN_TEST_SOURCE_DIR");
+    return std::string(source && *source ? source : AAS_SIGN_SOURCE_DIR) + "/tests/fixtures/recursive.msi";
+}
 void require(bool ok, const std::string &message) { if (!ok) throw std::runtime_error(message); }
 std::vector<uint8_t> read(const std::string &path) {
     platform::File file(path); std::vector<uint8_t> bytes(size_t(file.size()));
@@ -16,7 +21,7 @@ std::vector<uint8_t> read(const std::string &path) {
 }
 std::string fixture(platform::TempDir &dir, const std::string &name) {
     const auto path = dir.path() + "/" + name + ".msi";
-    platform::copy_file(std::string(AAS_SIGN_SOURCE_DIR) + "/tests/fixtures/recursive.msi", path);
+    platform::copy_file(fixture_source(), path);
     return path;
 }
 struct CabinetSnapshot {
@@ -69,7 +74,7 @@ void rejected(const std::string &path, const std::function<void(platform::MsiDat
 int aas_sign_main(int argc, char **argv) {
     try {
         if (argc == 5 && std::string(argv[1]) == "--create-fixture") {
-            platform::copy_file(std::string(AAS_SIGN_SOURCE_DIR) + "/tests/fixtures/recursive.msi", argv[2]);
+            platform::copy_file(fixture_source(), argv[2]);
             rewrite_msi_payload(argv[2], [&](const auto &payload, const auto &name) {
                 const auto bytes = read(name.find("PreservedDll") != std::string::npos ? argv[4] : argv[3]);
                 platform::write_whole_file(payload, bytes.data(), bytes.size()); return true;
@@ -129,15 +134,19 @@ int aas_sign_main(int argc, char **argv) {
           require(std::string(data.begin(), data.end()) == "Unchanged non-PE payload\n", "non-PE Binary stream changed");
         }
         const auto after = read(path);
+        std::map<std::string, std::vector<std::string>> saved_hashes;
+        {
+            platform::MsiDatabase db(path);
+            for (const auto &row : db.query("SELECT `File_`, `HashPart1`, `HashPart2`, `HashPart3`, `HashPart4` FROM `MsiFileHash`"))
+                saved_hashes.emplace(row[0], std::vector<std::string>(row.begin() + 1, row.end()));
+        }
         size_t count = 0;
         const auto second = rewrite_msi_payload(path, [&](const auto &payload, const auto &name) {
             require(read(payload) == expected.at(name), "reconstructed bytes differ: " + name);
             if (name.find("UnsignedExe") != std::string::npos || name.find("SecondExe") != std::string::npos) {
-                platform::MsiDatabase db(path);
                 const auto key = name.substr(name.find_last_of('/') + 1);
-                const auto rows = db.query("SELECT `HashPart1`, `HashPart2`, `HashPart3`, `HashPart4` FROM `MsiFileHash` WHERE `File_` = ?", {key});
                 auto hash = platform::msi_file_hash(payload);
-                for (size_t i = 0; i < 4; ++i) require(rows[0][i] == std::to_string(hash[i]), "MSI hash was not updated");
+                for (size_t i = 0; i < 4; ++i) require(saved_hashes.at(key)[i] == std::to_string(hash[i]), "MSI hash was not updated");
             }
             ++count; return false;
         });
@@ -155,18 +164,18 @@ int aas_sign_main(int argc, char **argv) {
         }, "cabinet mapping mismatch");
         rejected(fixture(dir, "transform"), [&](auto &db) {
             db.execute("INSERT INTO `_Storages` (`Name`, `Data`) VALUES (?, ?)",
-                       {std::string("EmbeddedTransform"), platform::MsiStreamPath{std::string(AAS_SIGN_SOURCE_DIR) + "/tests/fixtures/recursive.msi"}});
+                       {std::string("EmbeddedTransform"), platform::MsiStreamPath{fixture_source()}});
         }, "embedded transform");
         rejected(fixture(dir, "spanning"), [&](auto &db) {
             const auto cab = dir.path() + "/spanning.cab";
             db.extract_stream("SELECT `Data` FROM `_Streams` WHERE `Name` = ?", "first.cab", cab, 1024 * 1024);
-            platform::File file(cab); uint8_t flags = 1; file.write_at(30, &flags, 1);
+            { platform::File file(cab); uint8_t flags = 1; file.write_at(30, &flags, 1); }
             db.execute("UPDATE `_Streams` SET `Data` = ? WHERE `Name` = ?", {platform::MsiStreamPath{cab}, std::string("first.cab")});
         }, "spanning cabinet");
         rejected(fixture(dir, "compression"), [&](auto &db) {
             const auto cab = dir.path() + "/quantum.cab";
             db.extract_stream("SELECT `Data` FROM `_Streams` WHERE `Name` = ?", "first.cab", cab, 1024 * 1024);
-            platform::File file(cab); uint8_t compression = 2; file.write_at(42, &compression, 1);
+            { platform::File file(cab); uint8_t compression = 2; file.write_at(42, &compression, 1); }
             db.execute("UPDATE `_Streams` SET `Data` = ? WHERE `Name` = ?", {platform::MsiStreamPath{cab}, std::string("first.cab")});
         }, "unsupported cabinet compression");
         const auto failure = fixture(dir, "signing failure");

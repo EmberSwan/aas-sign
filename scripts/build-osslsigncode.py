@@ -33,10 +33,14 @@ def main():
         if ":" in line and "=" in line and not line.startswith(("//", "#")):
             key, value = line.split("=", 1)
             cache[key.split(":", 1)[0]] = value
-    for key in ("OPENSSL_CRYPTO_LIBRARY", "OPENSSL_SSL_LIBRARY", "OPENSSL_INCLUDE_DIR", "ZLIB_INCLUDE_DIR", "ZLIB_LIBRARY_RELEASE"):
+    # FindOpenSSL caches the configuration-specific library paths on MSVC;
+    # OPENSSL_{CRYPTO,SSL}_LIBRARY are non-cache result variables there.
+    openssl_libraries = (("LIB_EAY_RELEASE", "SSL_EAY_RELEASE") if os.name == "nt" else
+                         ("OPENSSL_CRYPTO_LIBRARY", "OPENSSL_SSL_LIBRARY"))
+    for key in (*openssl_libraries, "OPENSSL_INCLUDE_DIR", "ZLIB_INCLUDE_DIR", "ZLIB_LIBRARY_RELEASE"):
         found = pathlib.Path(cache.get(key, "missing")).resolve()
-        if not found.is_relative_to(prefix):
-            raise RuntimeError(f"{key} resolved outside the private dependency prefix: {found}")
+        if not found.is_relative_to(prefix) or not found.exists():
+            raise RuntimeError(f"{key} did not resolve to an existing path inside the private dependency prefix: {found}")
     subprocess.run(["cmake", "--build", str(build), "--parallel", str(args.jobs)], check=True)
     executable = build / ("osslsigncode.exe" if os.name == "nt" else "osslsigncode")
     subprocess.run([str(executable), "--version"], check=True)

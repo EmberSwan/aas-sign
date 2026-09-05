@@ -133,8 +133,11 @@ when signing a single file.
 
 Only SHA-256 signing content is supported. Package publishers must match the
 subject of the Azure signing certificate; aas-sign does not rewrite publisher
-identities. Sign the bundle itself; contained packages remain byte-for-byte
-unchanged. Signature replacement uses the companion's format support.
+identities. **Sign each package before creating a bundle, then sign the bundle.**
+Contained packages remain byte-for-byte unchanged: aas-sign does not sign them
+automatically. A bundle containing unsigned packages can pass outer signature
+verification but fail Windows deployment. The `recursive` option applies only
+to MSI files. Signature replacement uses the companion's format support.
 
 All operations use staged copies. A final digest check runs after attachment
 and timestamping, and failures leave the original untouched. The selected

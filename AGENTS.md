@@ -101,7 +101,8 @@ New outputs use private staging; `copy_file` requires a new destination and
   signatureAlgorithm is rsaEncryption.
 - Only SHA-256 signing content is supported. The companion handles the
   MSIX composite digest and distinct package/bundle SIP encodings. It leaves
-  inner bundle packages unchanged. Publishers must match the signing cert;
+  inner bundle packages unchanged; sign each package before bundling for
+  Windows deployment, then sign the bundle. Publishers must match the signing cert;
   no publisher rewrite or native manifest validation is implemented locally.
 - The selected upstream revision mishandles stored `[Content_Types].xml`;
   the final digest validation rejects these outputs without altering inputs.
@@ -170,4 +171,6 @@ The action obtains the exact aas-sign filename and a single platform-matching
 osslsigncode filename from the independently published manifest at
 `https://artifacts.emberswan.com/aas-sign/<tag>/sha256sums.txt`. Both downloads
 must verify before either is installed or run. Missing/ambiguous entries fail.
-The same manifest is manually uploaded to the immutable R2 path after release.
+CI creates a draft release. Review its assets and release notes, then upload
+the identical manifest to the immutable R2 path before manually publishing.
+Publishing makes the release assets and tag immutable.

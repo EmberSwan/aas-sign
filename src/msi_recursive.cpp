@@ -251,8 +251,10 @@ MsiRewriteResult rewrite_msi_payload(const std::string &staged_msi,
         for (auto &member : cab.members) {
             if (!sign(member.path, "CAB " + cab.name + "/" + member.name)) continue;
             cab.changed = true;
-            platform::File file(member.path);
-            const auto size = file.size();
+            uint64_t size;
+            // Release our writable handle before Windows Installer opens the
+            // payload to compute MsiFileHash with its own sharing flags.
+            { platform::File file(member.path); size = file.size(); }
             if (size > uint64_t(std::numeric_limits<int32_t>::max())) invalid("signed payload exceeds MSI FileSize range");
             db.execute("UPDATE `File` SET `FileSize` = ? WHERE `File` = ?", {int32_t(size), member.name});
             if (hash_rows.contains(member.name) && files.at(member.name).version.empty()) {

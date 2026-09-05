@@ -169,18 +169,21 @@ jobs:
       - name: Test platform and signing
         shell: pwsh
         env:
+          AAS_SIGN_TEST_SOURCE_DIR: ${{ github.workspace }}
           AAS_ASSET: ${{ needs.metadata.outputs.aas_windows }}
           OSSL_ASSET: ${{ needs.metadata.outputs.ossl_windows }}
         run: |
           $env:PATH = "$pwd/build-openssl-helper;$env:PATH"
+          $failed = $false
           & "./release/$env:AAS_ASSET" --version
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) { $failed = $true }
           & ./build-windows/msi_recursive_test.exe
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) { $failed = $true }
           & ./build-windows/platform_test.exe
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) { $failed = $true }
           python tests/signing_integration_test.py build-windows/signing_test_driver.exe "release/$env:OSSL_ASSET" . build-windows/msi_recursive_test.exe
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) { $failed = $true }
+          if ($failed) { exit 1 }
 
   sign-and-release:
     runs-on: ubuntu-24.04
@@ -221,7 +224,7 @@ jobs:
           set -euo pipefail
           sha256sum aas-sign-* osslsigncode-* THIRD-PARTY-NOTICES.txt provenance.json > sha256sums.txt
           sha256sum --check sha256sums.txt
-      - name: Publish release
+      - name: Create draft release
         working-directory: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -230,8 +233,9 @@ jobs:
           set -euo pipefail
           flags=()
           case "${GITHUB_REF_NAME}" in *-*) flags+=(--prerelease) ;; esac
-          gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" \
+          gh release create "${GITHUB_REF_NAME}" --draft --verify-tag --title "${GITHUB_REF_NAME}" \
             --generate-notes "${flags[@]}" aas-sign-* osslsigncode-* \
             THIRD-PARTY-NOTICES.txt provenance.json sha256sums.txt
-          # Publish this identical manifest manually to the immutable R2 path:
+          # Before manually publishing the draft, review all assets and notes,
+          # then upload this identical manifest to the immutable R2 path:
           # https://artifacts.emberswan.com/aas-sign/<tag>/sha256sums.txt

@@ -212,8 +212,11 @@ with tempfile.TemporaryDirectory(prefix="aas signing test ") as directory:
         thread.join()
         server.server_close()
     if os.name == 'nt':
-        run('powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        # Stream native installation diagnostics so an interactive OS prompt or
+        # stalled deployment is visible in CI while the test is still running.
+        subprocess.run(list(map(str, [
+            'powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
             SOURCE / 'tests/windows_install_test.ps1', '-Driver', DRIVER, '-Companion', COMPANION,
-            '-Key', key, '-CertDer', der, '-Workspace', root)
+            '-Key', key, '-CertDer', der, '-Workspace', root])), check=True, timeout=600)
     assert not list(root.glob('aas-sign-*')), 'staging workspaces leaked'
 print('Detached PE/MSI/MSIX/bundle signing, timestamping and rollback passed')

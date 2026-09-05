@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: ['**']
   pull_request:
 
 permissions:
@@ -95,13 +96,17 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Run platform and signing tests
         shell: pwsh
+        env:
+          AAS_SIGN_TEST_SOURCE_DIR: ${{ github.workspace }}
         run: |
           $env:PATH = "$pwd/build-companion/dependencies/prefix/bin;$env:PATH"
+          $failed = $false
           & ./build-windows/msi_recursive_test.exe
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) { $failed = $true }
           & ./build-windows/platform_test.exe
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) { $failed = $true }
           & ./build-windows/aas-sign.exe --version
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) { $failed = $true }
           python tests/signing_integration_test.py build-windows/signing_test_driver.exe build-companion/osslsigncode.exe . build-windows/msi_recursive_test.exe
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) { $failed = $true }
+          if ($failed) { exit 1 }
