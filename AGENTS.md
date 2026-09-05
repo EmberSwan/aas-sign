@@ -133,7 +133,7 @@ Clang-only POSIX harnesses use libFuzzer, ASan/UBSan and matching stdlib
 hardening. Keep production inspection and CMS parsers fuzzed; format hashing
 and injection are now upstream's responsibility.
 
-    cmake -B build-fuzz -DAAS_SIGN_FUZZ=ON -DDEPS=LOCAL \
+    cmake -B build-fuzz -DAAS_SIGN_FUZZ=ON -DDEPS=FETCH \
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
     cmake --build build-fuzz
     ./build-fuzz/fuzz_pe -dict=fuzz/pe.dict -max_total_time=60 fuzz/corpus/pe/
@@ -145,6 +145,10 @@ and injection are now upstream's responsibility.
 Other targets: fuzz_der_tlv, fuzz_x509_cert_id, fuzz_x509_split_certs.
 Use matching seed corpora and dictionaries. Copy corpora into a build directory
 for routine smoke tests to avoid committing fuzzer-generated mutations.
+Include `tests/fixtures/recursive.msi` in the MSI corpus to exercise complete
+multi-cabinet reconstruction. `DEPS=FETCH` includes the libmsi ownership fix;
+an unpatched system libmsi can report dependency leaks with `DEPS=LOCAL`.
+See `cmake/patches/README.md` for the direct regression and patch details.
 
 ## Distribution
 

@@ -11,7 +11,7 @@ storage caches retain their own references. It changes no file-format behavior.
 Apply it only to the private dependency build copy; the bundled upstream source
 archive and the osslsigncode submodule remain unchanged.
 
-`tests/libmsi_ownership_test.c` opens and closes a valid installer and the malformed
+`tests/libmsi_ownership_test.c` opens and closes a valid installer and the
 minimal CFB corpus seed directly through libmsi, without any aas-sign wrapper.
 It is a regression test when built with AddressSanitizer/LeakSanitizer and linked
 against the patched dependency. Arguments are `tests/fixtures/recursive.msi` and

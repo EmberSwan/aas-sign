@@ -207,6 +207,9 @@ if(BUILD_TESTING AND AAS_SIGN_FUZZ)
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/msi/minimal-msi-v3.msi"
     "${_aas_fuzz_msi_corpus}/minimal-msi-v3.msi" COPYONLY)
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/recursive.msi"
+    "${_aas_fuzz_msi_corpus}/recursive.msi" COPYONLY)
   add_test(NAME fuzz_msi_smoke
     COMMAND fuzz_msi
       -runs=1000
