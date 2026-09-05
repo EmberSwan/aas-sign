@@ -11,12 +11,19 @@
 #include <bcrypt.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <sddl.h>
 #include <winhttp.h>
 #include <cstdint>
+#include <algorithm>
 #include <cstdlib>
+#include <cwchar>
+#include <cwctype>
+#include <filesystem>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace platform {
@@ -587,12 +594,14 @@ HttpResponse http_post_binary(const std::string &host, int port,
 static std::wstring utf8_to_wide(const std::string &s)
 {
     if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()),
+    if (s.size() > size_t((std::numeric_limits<int>::max)()))
+        throw std::runtime_error("UTF-8 -> UTF-16: input exceeds Windows limit");
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), int(s.size()),
                                 nullptr, 0);
     if (n <= 0)
         throw std::runtime_error("UTF-8 -> UTF-16 conversion failed");
     std::wstring w(size_t(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), n);
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), int(s.size()), w.data(), n);
     return w;
 }
 
@@ -783,6 +792,371 @@ void remove_file(const std::string &utf8_path)
         throw std::runtime_error("DeleteFileW " + utf8_path + ": " +
                                  win_error(err));
     }
+}
+
+// --- Companion processes and private staging ---
+
+namespace {
+struct ScopedHandle {
+    HANDLE value = INVALID_HANDLE_VALUE;
+    explicit ScopedHandle(HANDLE h = INVALID_HANDLE_VALUE) : value(h) {}
+    ~ScopedHandle() {
+        if (value && value != INVALID_HANDLE_VALUE) CloseHandle(value);
+    }
+    ScopedHandle(const ScopedHandle &) = delete;
+    ScopedHandle &operator=(const ScopedHandle &) = delete;
+};
+
+std::string from_wide(const std::wstring &s)
+{
+    if (s.empty()) return {};
+    int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                    s.data(), int(s.size()), nullptr, 0, nullptr, nullptr);
+    if (length <= 0) throw std::runtime_error("UTF-16 -> UTF-8: " + win_error(GetLastError()));
+    std::string result(size_t(length), '\0');
+    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, s.data(), int(s.size()),
+                        result.data(), length, nullptr, nullptr);
+    return result;
+}
+
+std::wstring absolute_wpath(const std::wstring &path)
+{
+    DWORD size = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    if (!size) throw std::runtime_error("resolve " + from_wide(path) + ": " + win_error(GetLastError()));
+    std::vector<wchar_t> buffer(size);
+    DWORD n = GetFullPathNameW(path.c_str(), size, buffer.data(), nullptr);
+    if (!n || n >= size) throw std::runtime_error("resolve " + from_wide(path) + ": " + win_error(GetLastError()));
+    return std::wstring(buffer.data(), n);
+}
+
+bool is_executable(const std::wstring &path)
+{
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+std::wstring quote_argument(const std::string &arg)
+{
+    if (arg.find('\0') != std::string::npos)
+        throw std::runtime_error("execute: argument contains NUL");
+    // Microsoft CRT quoting: backslashes before a quote or the closing
+    // delimiter must be doubled. Always quote, including empty arguments.
+    std::wstring input = utf8_to_wide(arg), result = L"\"";
+    size_t slashes = 0;
+    for (wchar_t c : input) {
+        if (c == L'\\') { ++slashes; continue; }
+        result.append(c == L'\"' ? slashes * 2 + 1 : slashes, L'\\');
+        result.push_back(c);
+        slashes = 0;
+    }
+    result.append(slashes * 2, L'\\');
+    result.push_back(L'\"');
+    return result;
+}
+
+std::string random_suffix()
+{
+    unsigned char bytes[16];
+    auto status = BCryptGenRandom(nullptr, bytes, sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (status != 0) throw std::runtime_error("BCryptGenRandom temporary filename: " + nt_error(status));
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    for (unsigned char c : bytes) {
+        result.push_back(digits[c >> 4]);
+        result.push_back(digits[c & 15]);
+    }
+    return result;
+}
+
+std::vector<wchar_t> child_environment()
+{
+    LPWCH block = GetEnvironmentStringsW();
+    if (!block) throw std::runtime_error("GetEnvironmentStringsW: " + win_error(GetLastError()));
+    struct Cleanup {
+        LPWCH block;
+        ~Cleanup() { FreeEnvironmentStringsW(block); }
+    } cleanup{block};
+    std::vector<wchar_t> filtered;
+    for (const wchar_t *entry = block; *entry; entry += std::wcslen(entry) + 1) {
+        std::wstring value(entry);
+        auto separator = value.find(L'=', value.front() == L'=' ? 1 : 0);
+        std::wstring name = value.substr(0, separator);
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](wchar_t c) { return wchar_t(std::towupper(c)); });
+        if (name.starts_with(L"AZURE_") || name.starts_with(L"ACTIONS_ID_TOKEN_") ||
+            name == L"GH_TOKEN" || name == L"GITHUB_TOKEN" || name == L"INPUT_TOKEN" ||
+            name == L"GH_ENTERPRISE_TOKEN" || name == L"GITHUB_ENTERPRISE_TOKEN")
+            continue;
+        filtered.insert(filtered.end(), value.begin(), value.end());
+        filtered.push_back(L'\0');
+    }
+    if (filtered.empty()) filtered.push_back(L'\0');
+    filtered.push_back(L'\0');
+    return filtered;
+}
+}  // namespace
+
+std::string find_executable(const std::string &name)
+{
+    if (name.empty() || name.find('\0') != std::string::npos)
+        throw std::runtime_error("find executable: empty or invalid name");
+    std::wstring filename = utf8_to_wide(name);
+    if (std::filesystem::path(filename).extension().empty()) filename += L".exe";
+    if (name.find_first_of("/\\:") != std::string::npos) {
+        if (is_executable(filename)) return from_wide(absolute_wpath(filename));
+        throw std::runtime_error("find executable " + name + ": not an executable file");
+    }
+    DWORD size = GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    if (!size) throw std::runtime_error("find executable " + name + ": PATH is empty");
+    std::vector<wchar_t> buffer(size);
+    DWORD n = GetEnvironmentVariableW(L"PATH", buffer.data(), size);
+    if (!n || n >= size) throw std::runtime_error("read PATH: " + win_error(GetLastError()));
+    std::wstring path(buffer.data(), n);
+    size_t first = 0;
+    for (;;) {
+        size_t last = path.find(L';', first);
+        std::wstring dir = path.substr(first, last - first);
+        if (dir.size() >= 2 && dir.front() == L'\"' && dir.back() == L'\"')
+            dir = dir.substr(1, dir.size() - 2);
+        if (!dir.empty()) {
+            std::wstring candidate = dir + L"\\" + filename;
+            if (is_executable(candidate)) return from_wide(absolute_wpath(candidate));
+        }
+        if (last == std::wstring::npos) break;
+        first = last + 1;
+    }
+    throw std::runtime_error("find executable " + name + ": not found on PATH");
+}
+
+std::string executable_path()
+{
+    std::vector<wchar_t> buffer(1024);
+    for (;;) {
+        DWORD n = GetModuleFileNameW(nullptr, buffer.data(), DWORD(buffer.size()));
+        if (!n) throw std::runtime_error("GetModuleFileNameW: " + win_error(GetLastError()));
+        if (n < buffer.size()) return from_wide(std::wstring(buffer.data(), n));
+        if (buffer.size() >= 32768) throw std::runtime_error("GetModuleFileNameW: executable path too long");
+        buffer.resize(buffer.size() * 2);
+    }
+}
+
+ProcessResult run_process(const std::string &executable,
+                          const std::vector<std::string> &args)
+{
+    std::string resolved = find_executable(executable);
+    std::wstring command = quote_argument(resolved);
+    for (const auto &arg : args) command += L" " + quote_argument(arg);
+    if (command.size() >= 32767)
+        throw std::runtime_error("execute " + executable + ": command line exceeds Windows limit");
+    std::wstring application = utf8_to_wide(resolved);
+    auto environment = child_environment();
+    ProcessResult result{0, {}};
+    constexpr size_t output_limit = 1024 * 1024;
+    // Reserve before the child starts; output capture cannot allocate while
+    // the child may be blocked waiting for its output pipe to be drained.
+    result.output.reserve(output_limit);
+    SECURITY_ATTRIBUTES inherit{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE pipe_read, pipe_write;
+    if (!CreatePipe(&pipe_read, &pipe_write, &inherit, 0))
+        throw std::runtime_error("CreatePipe " + executable + ": " + win_error(GetLastError()));
+    ScopedHandle read_end(pipe_read), write_end(pipe_write);
+    if (!SetHandleInformation(read_end.value, HANDLE_FLAG_INHERIT, 0))
+        throw std::runtime_error("SetHandleInformation " + executable + ": " + win_error(GetLastError()));
+    ScopedHandle input(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    &inherit, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (input.value == INVALID_HANDLE_VALUE)
+        throw std::runtime_error("open NUL " + executable + ": " + win_error(GetLastError()));
+
+    // Explicit inheritance is essential when several signing workers spawn
+    // children simultaneously: another child's write pipe must not leak.
+    SIZE_T bytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+    std::vector<unsigned char> attributes(bytes);
+    auto *list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
+    if (!InitializeProcThreadAttributeList(list, 1, 0, &bytes))
+        throw std::runtime_error("InitializeProcThreadAttributeList " + executable + ": " + win_error(GetLastError()));
+    struct AttributeCleanup {
+        LPPROC_THREAD_ATTRIBUTE_LIST list;
+        ~AttributeCleanup() { DeleteProcThreadAttributeList(list); }
+    } cleanup{list};
+    HANDLE inherited[] = {write_end.value, input.value};
+    if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                  inherited, sizeof(inherited), nullptr, nullptr))
+        throw std::runtime_error("UpdateProcThreadAttribute " + executable + ": " + win_error(GetLastError()));
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = input.value;
+    startup.StartupInfo.hStdOutput = write_end.value;
+    startup.StartupInfo.hStdError = write_end.value;
+    startup.lpAttributeList = list;
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(application.c_str(), command.data(), nullptr, nullptr, TRUE,
+                         CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                         environment.data(), nullptr, &startup.StartupInfo, &process))
+        throw std::runtime_error("execute " + executable + ": " + win_error(GetLastError()));
+    ScopedHandle process_handle(process.hProcess), thread_handle(process.hThread);
+    CloseHandle(write_end.value);
+    write_end.value = INVALID_HANDLE_VALUE;
+    CloseHandle(input.value);
+    input.value = INVALID_HANDLE_VALUE;
+
+    char buffer[16384];
+    DWORD read_error = 0;
+    for (;;) {
+        DWORD n = 0;
+        if (!ReadFile(read_end.value, buffer, sizeof(buffer), &n, nullptr)) {
+            DWORD error = GetLastError();
+            if (error != ERROR_BROKEN_PIPE) {
+                read_error = error;
+                TerminateProcess(process_handle.value, 1);
+            }
+            break;
+        }
+        if (!n) break;
+        result.output.append(buffer, std::min(size_t(n), output_limit - result.output.size()));
+    }
+    if (WaitForSingleObject(process_handle.value, INFINITE) != WAIT_OBJECT_0)
+        throw std::runtime_error("wait for " + executable + ": " + win_error(GetLastError()));
+    if (read_error) throw std::runtime_error("capture " + executable + ": " + win_error(read_error));
+    DWORD status;
+    if (!GetExitCodeProcess(process_handle.value, &status))
+        throw std::runtime_error("GetExitCodeProcess " + executable + ": " + win_error(GetLastError()));
+    result.exit_code = status <= DWORD((std::numeric_limits<int>::max)()) ? int(status) : -1;
+    return result;
+}
+
+TempDir::TempDir(const std::string &parent)
+{
+    std::error_code ec;
+    std::wstring base = parent.empty() ? std::filesystem::temp_directory_path(ec).wstring()
+                                       : utf8_to_wide(parent);
+    if (ec) throw std::runtime_error("temporary directory: " + ec.message());
+    base = absolute_wpath(base);
+    ScopedHandle token;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.value))
+        throw std::runtime_error("temporary directory OpenProcessToken: " + win_error(GetLastError()));
+    DWORD size = 0;
+    GetTokenInformation(token.value, TokenUser, nullptr, 0, &size);
+    std::vector<unsigned char> info(size);
+    if (!GetTokenInformation(token.value, TokenUser, info.data(), size, &size))
+        throw std::runtime_error("temporary directory GetTokenInformation: " + win_error(GetLastError()));
+    LPWSTR sid = nullptr;
+    if (!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER *>(info.data())->User.Sid, &sid))
+        throw std::runtime_error("temporary directory ConvertSidToStringSidW: " + win_error(GetLastError()));
+    std::wstring dacl = L"D:P(A;OICI;FA;;;" + std::wstring(sid) + L")";
+    LocalFree(sid);
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(dacl.c_str(), SDDL_REVISION_1,
+                                                              &descriptor, nullptr))
+        throw std::runtime_error("temporary directory security: " + win_error(GetLastError()));
+    struct SecurityCleanup {
+        PSECURITY_DESCRIPTOR descriptor;
+        ~SecurityCleanup() { LocalFree(descriptor); }
+    } cleanup{descriptor};
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+    for (int attempt = 0; attempt < 32; ++attempt) {
+        std::wstring candidate = base + L"\\.aas-sign-" + utf8_to_wide(random_suffix());
+        if (CreateDirectoryW(candidate.c_str(), &attributes)) {
+            path_ = from_wide(candidate);
+            return;
+        }
+        DWORD error = GetLastError();
+        if (error != ERROR_ALREADY_EXISTS)
+            throw std::runtime_error("CreateDirectoryW " + from_wide(candidate) + ": " + win_error(error));
+    }
+    throw std::runtime_error("temporary directory " + from_wide(base) + ": exhausted unique names");
+}
+
+TempDir::~TempDir()
+{
+    std::error_code ec;
+    auto path = std::filesystem::path(utf8_to_wide(path_));
+    // CopyFile preserves read-only attributes, which otherwise prevent
+    // cleanup of temporary payloads on Windows.
+    for (std::filesystem::recursive_directory_iterator it(path, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        DWORD attributes = GetFileAttributesW(it->path().c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY))
+            SetFileAttributesW(it->path().c_str(), attributes & ~FILE_ATTRIBUTE_READONLY);
+    }
+    std::filesystem::remove_all(path, ec);
+}
+
+void copy_file(const std::string &from, const std::string &to)
+{
+    auto source = utf8_to_wide(from), target = utf8_to_wide(to);
+    DWORD attributes = GetFileAttributesW(source.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+        throw std::runtime_error("copy " + from + ": " + win_error(GetLastError()));
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY)
+        throw std::runtime_error("copy " + from + ": not a regular file");
+    if (!CopyFileW(source.c_str(), target.c_str(), TRUE))
+        throw std::runtime_error("CopyFileW " + from + " -> " + to + ": " + win_error(GetLastError()));
+}
+
+void atomic_replace_file(const std::string &staged, const std::string &destination)
+{
+    auto stage = utf8_to_wide(staged), target = utf8_to_wide(destination);
+    for (const auto &path : {stage, target}) {
+        DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+            throw std::runtime_error("replace " + from_wide(path) + ": " + win_error(GetLastError()));
+        if (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+            throw std::runtime_error("replace " + from_wide(path) + ": not a regular file");
+    }
+    {
+        ScopedHandle original(CreateFileW(target.c_str(), GENERIC_READ,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (original.value == INVALID_HANDLE_VALUE)
+            throw std::runtime_error("open(replace) " + destination + ": " + win_error(GetLastError()));
+        // The exclusive stage open also rejects a stage that aliases the
+        // original (same path or hard link) before any mutation takes place.
+        ScopedHandle handle(CreateFileW(stage.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                         0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (handle.value == INVALID_HANDLE_VALUE)
+            throw std::runtime_error("open(replace) " + staged + ": " + win_error(GetLastError()));
+        if (!FlushFileBuffers(handle.value))
+            throw std::runtime_error("FlushFileBuffers " + staged + ": " + win_error(GetLastError()));
+    }
+    // ReplaceFile preserves ACLs, named streams, creation time, encryption
+    // and compression. Its WRITE_THROUGH flag is unsupported; flush above.
+    // A backup is necessary because some ReplaceFile failures can rename
+    // the original before failing to move the replacement.
+    std::wstring backup = target + L".aas-sign-backup-" + utf8_to_wide(random_suffix());
+    if (!ReplaceFileW(target.c_str(), stage.c_str(), backup.c_str(), 0, nullptr, nullptr)) {
+        DWORD error = GetLastError();
+        if (error == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
+            if (!MoveFileExW(backup.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH))
+                throw std::runtime_error("ReplaceFileW " + destination + ": " + win_error(error) +
+                                         "; restoring original failed: " + win_error(GetLastError()) +
+                                         "; original preserved at " + from_wide(backup));
+        }
+        throw std::runtime_error("ReplaceFileW " + destination + ": " + win_error(error));
+    }
+    DeleteFileW(backup.c_str());
+}
+
+bool same_file(const std::string &first, const std::string &second)
+{
+    BY_HANDLE_FILE_INFORMATION a{}, b{};
+    for (auto entry : {std::pair<const std::string *, BY_HANDLE_FILE_INFORMATION *>{&first, &a},
+                       std::pair<const std::string *, BY_HANDLE_FILE_INFORMATION *>{&second, &b}}) {
+        auto path = utf8_to_wide(*entry.first);
+        ScopedHandle handle(CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (handle.value == INVALID_HANDLE_VALUE) {
+            DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return false;
+            throw std::runtime_error("open(identity) " + *entry.first + ": " + win_error(error));
+        }
+        if (!GetFileInformationByHandle(handle.value, entry.second))
+            throw std::runtime_error("GetFileInformationByHandle " + *entry.first + ": " + win_error(GetLastError()));
+    }
+    return a.dwVolumeSerialNumber == b.dwVolumeSerialNumber &&
+           a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow;
 }
 
 // --- LoopbackServer / launch_browser / config_dir (OAuth login) ---

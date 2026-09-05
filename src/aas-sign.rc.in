@@ -18,12 +18,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "Christopher Wellons"
       VALUE "FileDescription",  "Azure Artifact Signing utility"
-      VALUE "FileVersion",      "@PROJECT_VERSION@"
+      VALUE "FileVersion",      "@AAS_SIGN_VERSION_STRING@"
       VALUE "InternalName",     "aas-sign"
       VALUE "LegalCopyright",   "Public domain"
       VALUE "OriginalFilename", "aas-sign.exe"
       VALUE "ProductName",      "aas-sign"
-      VALUE "ProductVersion",   "@PROJECT_VERSION@"
+      VALUE "ProductVersion",   "@AAS_SIGN_VERSION_STRING@"
     END
   END
   BLOCK "VarFileInfo"

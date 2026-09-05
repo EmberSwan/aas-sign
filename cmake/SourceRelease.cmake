@@ -76,6 +76,15 @@ message(STATUS "Bundling dependencies...")
 set(DEPS_DIR "${STAGE}/deps")
 include("${CMAKE_CURRENT_LIST_DIR}/BundleDeps.cmake")
 
+# Dependency bundling uses an explicit list of source directories. Keep this
+# guard as a second check: developer credentials in deps/.env must never enter
+# a source release, even if the bundling implementation changes later.
+file(GLOB_RECURSE _private_dep_env_files
+     "${STAGE}/deps/.env" "${STAGE}/deps/.env.*")
+if(_private_dep_env_files)
+  message(FATAL_ERROR "Refusing to package private dependency environment files")
+endif()
+
 message(STATUS "Creating ${NAME}.tar.gz...")
 execute_process(
   COMMAND ${CMAKE_COMMAND} -E tar czf "${OUTPUT}" "${NAME}"

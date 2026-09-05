@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <spawn.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -27,10 +28,18 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
+#include <algorithm>
+#include <filesystem>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
+
+extern char **environ;
 
 namespace platform {
 
@@ -720,6 +729,296 @@ void remove_file(const std::string &utf8_path)
 {
     if (::unlink(utf8_path.c_str()) < 0 && errno != ENOENT)
         throw std::runtime_error(errno_msg("unlink", utf8_path));
+}
+
+// --- Companion processes and private staging ---
+
+namespace {
+struct ScopedFd {
+    int value = -1;
+    explicit ScopedFd(int fd = -1) : value(fd) {}
+    ~ScopedFd() { if (value >= 0) ::close(value); }
+    ScopedFd(const ScopedFd &) = delete;
+    ScopedFd &operator=(const ScopedFd &) = delete;
+};
+
+std::string absolute_path(const std::string &path)
+{
+    std::error_code ec;
+    auto result = std::filesystem::absolute(path, ec);
+    if (ec) throw std::runtime_error("resolve " + path + ": " + ec.message());
+    return result.lexically_normal().string();
+}
+
+bool is_executable(const std::string &path)
+{
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+           ::access(path.c_str(), X_OK) == 0;
+}
+
+bool private_environment(std::string_view name)
+{
+    return name.starts_with("AZURE_") || name.starts_with("ACTIONS_ID_TOKEN_") ||
+           name == "GH_TOKEN" || name == "GITHUB_TOKEN" || name == "INPUT_TOKEN" ||
+           name == "GH_ENTERPRISE_TOKEN" || name == "GITHUB_ENTERPRISE_TOKEN";
+}
+}  // namespace
+
+std::string find_executable(const std::string &name)
+{
+    if (name.empty() || name.find('\0') != std::string::npos)
+        throw std::runtime_error("find executable: empty or invalid name");
+    if (name.find('/') != std::string::npos) {
+        if (is_executable(name)) return absolute_path(name);
+        throw std::runtime_error("find executable " + name + ": not an executable file");
+    }
+    const char *env = std::getenv("PATH");
+    std::string path = env ? env : "/usr/bin:/bin";
+    size_t first = 0;
+    for (;;) {
+        size_t last = path.find(':', first);
+        std::string dir = path.substr(first, last - first);
+        std::string candidate = (dir.empty() ? "." : dir) + "/" + name;
+        if (is_executable(candidate)) return absolute_path(candidate);
+        if (last == std::string::npos) break;
+        first = last + 1;
+    }
+    throw std::runtime_error("find executable " + name + ": not found on PATH");
+}
+
+std::string executable_path()
+{
+#ifdef __APPLE__
+    uint32_t length = 0;
+    _NSGetExecutablePath(nullptr, &length);
+    std::vector<char> buffer(length);
+    if (_NSGetExecutablePath(buffer.data(), &length) != 0)
+        throw std::runtime_error("_NSGetExecutablePath: path exceeds buffer");
+    return absolute_path(buffer.data());
+#else
+    std::vector<char> buffer(1024);
+    for (;;) {
+        ssize_t n = ::readlink("/proc/self/exe", buffer.data(), buffer.size());
+        if (n < 0) throw std::runtime_error(errno_msg("readlink", "/proc/self/exe"));
+        if (size_t(n) < buffer.size()) return std::string(buffer.data(), size_t(n));
+        if (buffer.size() >= 1024 * 1024)
+            throw std::runtime_error("readlink /proc/self/exe: path exceeds 1 MiB");
+        buffer.resize(buffer.size() * 2);
+    }
+#endif
+}
+
+ProcessResult run_process(const std::string &executable,
+                          const std::vector<std::string> &args)
+{
+    std::string resolved = find_executable(executable);
+    std::vector<char *> argv;
+    argv.reserve(args.size() + 2);
+    argv.push_back(resolved.data());
+    for (const auto &arg : args) {
+        if (arg.find('\0') != std::string::npos)
+            throw std::runtime_error("execute " + executable + ": argument contains NUL");
+        argv.push_back(const_cast<char *>(arg.c_str()));
+    }
+    argv.push_back(nullptr);
+    std::vector<std::string> environment;
+    for (char **entry = environ; entry && *entry; ++entry) {
+        std::string value(*entry);
+        if (!private_environment(std::string_view(value).substr(0, value.find('='))))
+            environment.push_back(std::move(value));
+    }
+    std::vector<char *> envp;
+    envp.reserve(environment.size() + 1);
+    for (auto &entry : environment) envp.push_back(entry.data());
+    envp.push_back(nullptr);
+    ProcessResult result{0, {}};
+    constexpr size_t output_limit = 1024 * 1024;
+    // Allocate before spawning so an allocation failure cannot orphan a
+    // child blocked on its output pipe. Appends below stay within capacity.
+    result.output.reserve(output_limit);
+
+    // Serialize descriptor setup/spawn so the portable pipe+fcntl fallback
+    // cannot leak another worker's pipe into a concurrently spawned child.
+    static std::mutex spawn_mutex;
+    std::unique_lock<std::mutex> lock(spawn_mutex);
+    int descriptors[2];
+#ifdef __linux__
+    if (::pipe2(descriptors, O_CLOEXEC) < 0)
+#else
+    if (::pipe(descriptors) < 0)
+#endif
+        throw std::runtime_error(errno_msg("pipe for", executable));
+    ScopedFd read_end(descriptors[0]), write_end(descriptors[1]);
+    // Keep source descriptors above stderr even when a caller closed stdio.
+    for (ScopedFd *fd : {&read_end, &write_end}) {
+        int replacement = ::fcntl(fd->value, F_DUPFD_CLOEXEC, 3);
+        if (replacement < 0)
+            throw std::runtime_error(errno_msg("duplicate pipe for", executable));
+        ::close(fd->value);
+        fd->value = replacement;
+    }
+    posix_spawn_file_actions_t actions;
+    int error = posix_spawn_file_actions_init(&actions);
+    if (error) throw std::runtime_error("spawn actions " + executable + ": " + std::strerror(error));
+    struct ActionCleanup {
+        posix_spawn_file_actions_t *actions;
+        ~ActionCleanup() { posix_spawn_file_actions_destroy(actions); }
+    } cleanup{&actions};
+    auto check = [&](int code) {
+        if (code) throw std::runtime_error("spawn actions " + executable + ": " + std::strerror(code));
+    };
+    check(posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0));
+    check(posix_spawn_file_actions_adddup2(&actions, write_end.value, STDOUT_FILENO));
+    check(posix_spawn_file_actions_adddup2(&actions, write_end.value, STDERR_FILENO));
+    check(posix_spawn_file_actions_addclose(&actions, read_end.value));
+    check(posix_spawn_file_actions_addclose(&actions, write_end.value));
+#ifdef __GLIBC__
+#if __GLIBC_PREREQ(2, 34)
+    // Close unrelated parent sockets/files too, even if a dependency did
+    // not mark them CLOEXEC. The duplicated standard handles survive.
+    check(posix_spawn_file_actions_addclosefrom_np(&actions, 3));
+#endif
+#endif
+    posix_spawnattr_t attributes;
+    check(posix_spawnattr_init(&attributes));
+    struct AttributeCleanup {
+        posix_spawnattr_t *attributes;
+        ~AttributeCleanup() { posix_spawnattr_destroy(attributes); }
+    } attribute_cleanup{&attributes};
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+    // Darwin provides default-close semantics; explicit dup2/open file
+    // actions above select the only descriptors inherited by the child.
+    check(posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT));
+#endif
+    pid_t pid = -1;
+    error = posix_spawn(&pid, resolved.c_str(), &actions, &attributes, argv.data(), envp.data());
+    if (error) throw std::runtime_error("execute " + executable + ": " + std::strerror(error));
+    ::close(write_end.value);
+    write_end.value = -1;
+    lock.unlock();
+
+    char buffer[16384];
+    int read_error = 0;
+    for (;;) {
+        ssize_t n = ::read(read_end.value, buffer, sizeof(buffer));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            read_error = errno;
+            ::kill(pid, SIGKILL);
+            break;
+        }
+        if (n == 0) break;
+        result.output.append(buffer, std::min(size_t(n), output_limit - result.output.size()));
+    }
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        throw std::runtime_error(errno_msg("wait for", executable));
+    }
+    if (read_error)
+        throw std::runtime_error("capture " + executable + ": " + std::strerror(read_error));
+    result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    return result;
+}
+
+TempDir::TempDir(const std::string &parent)
+{
+    std::error_code ec;
+    std::string base = parent.empty() ? std::filesystem::temp_directory_path(ec).string() : parent;
+    if (ec) throw std::runtime_error("temporary directory: " + ec.message());
+    std::string pattern = absolute_path(base) + "/.aas-sign-XXXXXX";
+    if (!::mkdtemp(pattern.data()))
+        throw std::runtime_error(errno_msg("mkdtemp", pattern));
+    path_ = std::move(pattern);
+}
+
+TempDir::~TempDir()
+{
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+}
+
+void copy_file(const std::string &from, const std::string &to)
+{
+    ScopedFd source(::open(from.c_str(), O_RDONLY | O_CLOEXEC));
+    if (source.value < 0) throw std::runtime_error(errno_msg("open(copy)", from));
+    struct stat st;
+    if (::fstat(source.value, &st) < 0) throw std::runtime_error(errno_msg("fstat", from));
+    if (!S_ISREG(st.st_mode)) throw std::runtime_error("copy " + from + ": not a regular file");
+    ScopedFd target(::open(to.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
+    if (target.value < 0) throw std::runtime_error(errno_msg("create(copy)", to));
+    try {
+        char buffer[65536];
+        for (;;) {
+            ssize_t n = ::read(source.value, buffer, sizeof(buffer));
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                throw std::runtime_error(errno_msg("read(copy)", from));
+            }
+            if (n == 0) break;
+            ssize_t offset = 0;
+            while (offset < n) {
+                ssize_t written = ::write(target.value, buffer + offset, size_t(n - offset));
+                if (written < 0 && errno == EINTR) continue;
+                if (written <= 0) throw std::runtime_error(errno_msg("write(copy)", to));
+                offset += written;
+            }
+        }
+        if (::fchmod(target.value, st.st_mode & 07777) < 0)
+            throw std::runtime_error(errno_msg("fchmod(copy)", to));
+        int fd = target.value;
+        target.value = -1;
+        if (::close(fd) < 0) throw std::runtime_error(errno_msg("close(copy)", to));
+    } catch (...) {
+        ::unlink(to.c_str());
+        throw;
+    }
+}
+
+void atomic_replace_file(const std::string &staged, const std::string &destination)
+{
+    struct stat original;
+    if (::lstat(destination.c_str(), &original) < 0)
+        throw std::runtime_error(errno_msg("lstat(replace)", destination));
+    if (!S_ISREG(original.st_mode))
+        throw std::runtime_error("replace " + destination + ": not a regular file");
+    ScopedFd stage(::open(staged.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW));
+    if (stage.value < 0) throw std::runtime_error(errno_msg("open(replace)", staged));
+    struct stat st;
+    if (::fstat(stage.value, &st) < 0) throw std::runtime_error(errno_msg("fstat(replace)", staged));
+    if (!S_ISREG(st.st_mode)) throw std::runtime_error("replace " + staged + ": not a regular file");
+    if (original.st_dev == st.st_dev && original.st_ino == st.st_ino)
+        throw std::runtime_error("replace " + destination + ": stage is the original file");
+    if (st.st_uid != original.st_uid || st.st_gid != original.st_gid) {
+        if (::fchown(stage.value, original.st_uid, original.st_gid) < 0)
+            throw std::runtime_error(errno_msg("fchown(replace)", staged));
+    }
+    if (::fchmod(stage.value, original.st_mode & 07777) < 0)
+        throw std::runtime_error(errno_msg("fchmod(replace)", staged));
+    if (::fsync(stage.value) < 0)
+        throw std::runtime_error(errno_msg("fsync(replace)", staged));
+    if (::rename(staged.c_str(), destination.c_str()) < 0)
+        throw std::runtime_error(errno_msg("rename(replace)", destination));
+    // Rename has committed. Directory fsync improves crash durability, but
+    // cannot turn a successful replacement into a reported failed operation.
+    auto parent = std::filesystem::path(destination).parent_path();
+    ScopedFd directory(::open((parent.empty() ? "." : parent.string()).c_str(),
+                              O_RDONLY | O_CLOEXEC | O_DIRECTORY));
+    if (directory.value >= 0) ::fsync(directory.value);
+}
+
+bool same_file(const std::string &first, const std::string &second)
+{
+    struct stat a, b;
+    for (auto entry : {std::pair<const std::string *, struct stat *>{&first, &a},
+                       std::pair<const std::string *, struct stat *>{&second, &b}}) {
+        if (::stat(entry.first->c_str(), entry.second) < 0) {
+            if (errno == ENOENT || errno == ENOTDIR) return false;
+            throw std::runtime_error(errno_msg("stat(identity)", *entry.first));
+        }
+    }
+    return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
 
 // --- LoopbackServer / launch_browser / config_dir (OAuth login) ---

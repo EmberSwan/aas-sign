@@ -79,7 +79,12 @@ function(aas_sign_add_fuzz_target name)
   target_link_options(${name} PRIVATE ${_aas_fuzz_flags})
   target_link_libraries(${name} PRIVATE
     nlohmann_json::nlohmann_json
-    mbedtls mbedx509 mbedcrypto Threads::Threads)
+    aas_msi_dependencies Threads::Threads)
+  if(DEPS STREQUAL "LOCAL")
+    target_link_libraries(${name} PRIVATE MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto)
+  else()
+    target_link_libraries(${name} PRIVATE mbedtls mbedx509 mbedcrypto)
+  endif()
 endfunction()
 
 # --- targets -----------------------------------------------------------
@@ -96,14 +101,15 @@ aas_sign_add_fuzz_target(fuzz_x509_split_certs
   fuzz/fuzz_x509_split_certs.cpp
   src/x509.cpp)
 
-aas_sign_add_fuzz_target(fuzz_tsa_parse
-  fuzz/fuzz_tsa_parse.cpp
-  src/tsa.cpp src/x509.cpp src/der.cpp src/base64.cpp src/posix.cpp)
+aas_sign_add_fuzz_target(fuzz_cms_indirect
+  fuzz/fuzz_cms_indirect.cpp
+  src/cms.cpp src/x509.cpp src/der.cpp src/posix.cpp)
 
 aas_sign_add_fuzz_target(fuzz_pe
   fuzz/fuzz_pe.cpp
-  src/pe.cpp src/posix.cpp)
+  src/signing.cpp src/cms.cpp src/x509.cpp src/der.cpp src/base64.cpp
+  src/msi_recursive.cpp src/msi_package_posix.cpp src/posix.cpp)
 
 aas_sign_add_fuzz_target(fuzz_msi
   fuzz/fuzz_msi.cpp
-  src/msi.cpp src/posix.cpp)
+  src/msi_recursive.cpp src/msi_package_posix.cpp src/posix.cpp)

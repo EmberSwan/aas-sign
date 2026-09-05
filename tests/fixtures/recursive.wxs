@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="{98B670F2-9EED-4123-BE46-23ED481421D0}" Name="aas-sign recursive fixture"
+           Language="1033" Version="1.0.0" Manufacturer="aas-sign tests"
+           UpgradeCode="{22222222-3333-4444-5555-666666666666}">
+    <Package Id="{11111111-2222-3333-4444-555555555555}" InstallerVersion="200" Compressed="yes"/>
+    <Media Id="1" Cabinet="first.cab" EmbedCab="yes"/>
+    <Media Id="2" Cabinet="second.cab" EmbedCab="yes"/>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLDIR" Name="aas-sign-test">
+          <Component Id="First" Guid="{11111111-3333-4444-5555-666666666666}">
+            <File Id="UnsignedExe" Name="unsigned.exe" Source="$(var.payload)/unsigned.exe" KeyPath="yes"/>
+            <File Id="PreservedDll" Name="preserved.dll" Source="$(var.payload)/preserved.dll"/>
+            <File Id="TextFile" Name="notes.txt" Source="$(var.payload)/notes.txt"/>
+          </Component>
+          <Directory Id="NESTEDDIR" Name="nested">
+            <Component Id="Second" Guid="{11111111-3333-4444-5555-777777777777}">
+              <File Id="SecondExe" Name="second.bin" Source="$(var.payload)/unsigned.exe" KeyPath="yes"/>
+              <File Id="NestedMsi" Name="nested.msi" Source="$(var.payload)/nested.msi"/>
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="Complete" Title="Fixture" Level="1">
+      <ComponentRef Id="First"/><ComponentRef Id="Second"/>
+    </Feature>
+    <Binary Id="CustomActionPe" SourceFile="$(var.payload)/unsigned.exe"/>
+    <Binary Id="NonPe" SourceFile="$(var.payload)/notes.txt"/>
+  </Product>
+</Wix>

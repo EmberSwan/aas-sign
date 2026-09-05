@@ -4,25 +4,16 @@
 #include <cstdint>
 #include <vector>
 
-enum class AuthenticodeFormat { Pe, Msi };
+// Extract the exact SpcIndirectDataContent DER from osslsigncode extract-data.
+// Only SHA-256 content is supported. All wrappers are checked before returning.
+std::vector<uint8_t> cms_extract_indirect_data(const std::vector<uint8_t> &pkcs7);
+bool cms_has_signer(const std::vector<uint8_t> &pkcs7);
 
-// Compute SHA-256(DER(authenticated_attributes_as_SET)).
-// file_hash is the format-specific Authenticode digest; format selects the
-// PE image or MSI SIP payload. This is the digest that Azure will sign.
+// Format-independent adapter. The same indirect_data bytes must be supplied
+// to hashing and assembly; the digest can be an APPX composite hash blob.
 std::array<uint8_t, 32> cms_auth_attrs_hash(
-    const std::array<uint8_t, 32> &file_hash,
-    AuthenticodeFormat format = AuthenticodeFormat::Pe);
-
-// Build a complete Authenticode SignedData ContentInfo. The caller stores it
-// in a PE WIN_CERTIFICATE or the MSI DigitalSignature stream.
-//
-// If timestamp_token_der is non-empty, it is embedded in the SignerInfo as
-// an unsigned attribute under OID 1.3.6.1.4.1.311.3.3.1
-// (szOID_RFC3161_counterSign).  The bytes must be a complete DER-encoded
-// ContentInfo SEQUENCE as returned by an RFC 3161 TSA.
+    const std::vector<uint8_t> &indirect_data);
 std::vector<uint8_t> cms_build_authenticode(
-    const std::array<uint8_t, 32> &file_hash,
+    const std::vector<uint8_t> &indirect_data,
     const std::vector<uint8_t> &signature,
-    const std::vector<uint8_t> &certs_der,
-    const std::vector<uint8_t> &timestamp_token_der = {},
-    AuthenticodeFormat format = AuthenticodeFormat::Pe);
+    const std::vector<uint8_t> &certs_der);

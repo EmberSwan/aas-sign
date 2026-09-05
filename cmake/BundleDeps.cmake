@@ -25,6 +25,12 @@ function(bundle_dep name url hash)
     return()
   endif()
 
+  set(local "${CMAKE_CURRENT_LIST_DIR}/../deps/${name}")
+  if(IS_DIRECTORY "${local}")
+    file(COPY "${local}" DESTINATION "${DEPS_DIR}")
+    return()
+  endif()
+
   string(REGEX REPLACE ".*/" "" archive "${url}")
   set(archive_path "${DEPS_DIR}/${archive}")
   message(STATUS "${name}: downloading ${url}")
@@ -55,3 +61,16 @@ endfunction()
 file(MAKE_DIRECTORY "${DEPS_DIR}")
 bundle_dep(json    "${JSON_URL}"    "${JSON_HASH}")
 bundle_dep(mbedtls "${MBEDTLS_URL}" "${MBEDTLS_HASH}")
+
+# The companion is rebuilt from an initialized Git checkout, not bundled here.
+# MSI reconstruction libraries are included for the offline aas-sign build.
+# Copy only named source directories; deps/.env and other private files are
+# deliberately outside this allowlist.
+find_program(PYTHON3 python3 REQUIRED)
+execute_process(
+  COMMAND "${PYTHON3}" "${CMAKE_CURRENT_LIST_DIR}/../scripts/build-dependencies.py"
+          bundle --sources "${DEPS_DIR}"
+  RESULT_VARIABLE recursive_bundle_result)
+if(NOT recursive_bundle_result EQUAL 0)
+  message(FATAL_ERROR "Bundling MSI dependency sources failed")
+endif()

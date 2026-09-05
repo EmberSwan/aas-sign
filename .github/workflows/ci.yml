@@ -12,36 +12,96 @@ env:
 
 jobs:
   native:
-    name: Native build and tests
+    name: Linux static builds and interoperability tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build bison valac gettext patch pkg-config perl
+          python3 -m pip install meson==1.9.1
+      - name: Build unmodified companion
+        run: python3 scripts/build-osslsigncode.py
       - name: Configure
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
-          -DBUILD_TESTING=ON
-          -DDEPS=FETCH
-      - name: Build
-        run: cmake --build build -j2
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+          -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          -DBUILD_TESTING=ON -DDEPS=FETCH
+          -DAAS_SIGN_OSSLSIGNCODE="$PWD/build-companion/osslsigncode"
+      - name: Build and test
+        run: |
+          cmake --build build -j2
+          ctest --test-dir build --output-on-failure
+          python3 scripts/check-runtime-deps.py build/aas-sign build-companion/osslsigncode
 
   mingw:
-    name: MinGW compile
+    name: MinGW build
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - name: Install MinGW
         run: |
           sudo apt-get update
           sudo apt-get install -y mingw-w64
-      - name: Configure
-        run: >-
-          cmake -S . -B build-mingw
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_TOOLCHAIN_FILE=cmake/x86_64-w64-mingw32.cmake
-          -DCMAKE_EXE_LINKER_FLAGS=-static
-          -DBUILD_TESTING=OFF
-      - name: Build
-        run: cmake --build build-mingw -j2
+      - name: Configure and build
+        run: |
+          cmake -S . -B build-mingw -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/x86_64-w64-mingw32.cmake \
+            -DCMAKE_EXE_LINKER_FLAGS=-static -DBUILD_TESTING=ON
+          cmake --build build-mingw -j2
+          python3 scripts/check-runtime-deps.py build-mingw/aas-sign.exe
+      - uses: actions/upload-artifact@v5
+        with:
+          name: windows-test-binaries
+          path: |
+            build-mingw/aas-sign.exe
+            build-mingw/platform_test.exe
+            build-mingw/msi_recursive_test.exe
+            build-mingw/signing_test_driver.exe
+
+  windows:
+    name: Windows companion and runtime tests
+    runs-on: windows-2022
+    needs: mingw
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: actions/download-artifact@v5
+        with:
+          name: windows-test-binaries
+          path: build-windows
+      - name: Build companion
+        shell: pwsh
+        run: |
+          python scripts/build-osslsigncode.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/check-runtime-deps.py build-companion/osslsigncode.exe build-windows/aas-sign.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Run platform and signing tests
+        shell: pwsh
+        run: |
+          $env:PATH = "$pwd/build-companion/dependencies/prefix/bin;$env:PATH"
+          & ./build-windows/msi_recursive_test.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & ./build-windows/platform_test.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & ./build-windows/aas-sign.exe --version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tests/signing_integration_test.py build-windows/signing_test_driver.exe build-companion/osslsigncode.exe . build-windows/msi_recursive_test.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

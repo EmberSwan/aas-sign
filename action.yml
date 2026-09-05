@@ -1,5 +1,5 @@
 name: aas-sign
-description: Sign PE images and MSI packages with Azure Artifact Signing
+description: Sign PE images, MSI installers, and MSIX packages and bundles with Azure Artifact Signing
 
 inputs:
   endpoint:
@@ -31,7 +31,7 @@ inputs:
   version:
     description: aas-sign release tag to install
     required: false
-    default: v1.2.0
+    default: v1.3.0
   timestamp-url:
     description: RFC 3161 TSA URL (overrides aas-sign's built-in default)
     required: false
@@ -44,6 +44,10 @@ inputs:
     description: Set to "true" to add the enhanced MSI metadata signature
     required: false
     default: "false"
+  recursive:
+    description: Set to "true" to sign unsigned PE payloads before signing MSI installers; ignored for other targets
+    required: false
+    default: "false"
   max-parallel:
     description: Maximum concurrent signing operations
     required: false
@@ -52,7 +56,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install aas-sign
+    - name: Install aas-sign and osslsigncode
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
@@ -73,6 +77,7 @@ runs:
         INPUT_TIMESTAMP_URL: ${{ inputs.timestamp-url }}
         INPUT_NO_TIMESTAMP:  ${{ inputs.no-timestamp }}
         INPUT_MSI_DSE:       ${{ inputs.msi-dse }}
+        INPUT_RECURSIVE:     ${{ inputs.recursive }}
         INPUT_MAX_PARALLEL:  ${{ inputs.max-parallel }}
       run: |
         set -euo pipefail
@@ -91,6 +96,7 @@ runs:
         fi
 
         args=(
+          --osslsigncode "${AAS_SIGN_OSSLSIGNCODE}"
           --endpoint "${INPUT_ENDPOINT}"
           --account  "${INPUT_ACCOUNT}"
           --profile  "${INPUT_PROFILE}"
@@ -119,6 +125,9 @@ runs:
         fi
         if [ "${INPUT_MSI_DSE}" = "true" ]; then
           args+=(--msi-dse)
+        fi
+        if [ "${INPUT_RECURSIVE}" = "true" ]; then
+          args+=(--recursive)
         fi
         if [ -n "${INPUT_MAX_PARALLEL}" ]; then
           args+=(--max-parallel "${INPUT_MAX_PARALLEL}")

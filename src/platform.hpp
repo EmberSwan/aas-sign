@@ -29,6 +29,50 @@ namespace platform {
 void write_stdout(std::string_view bytes);
 void write_stderr(std::string_view bytes);
 
+struct ProcessResult {
+    int exit_code;
+    // Merged stdout/stderr, limited to the first 1 MiB. The pipe is
+    // drained completely even when output exceeds this limit.
+    std::string output;
+};
+
+// Execute directly (no shell). Arguments and paths are UTF-8. Stdin is
+// closed/empty, and nonzero child exits are returned rather than thrown.
+// Spawn or capture errors throw with the executable/operation context.
+// Azure/GitHub token environment variables are withheld from companions;
+// ordinary environment settings (PATH, CA bundles, proxies) are inherited.
+ProcessResult run_process(const std::string &executable,
+                          const std::vector<std::string> &args);
+std::string executable_path();
+// Resolve an executable using PATH, or validate a supplied path. Returns
+// an absolute path and throws if no executable regular file is found.
+std::string find_executable(const std::string &name);
+
+// Private staging workspace. An empty parent selects the system temporary
+// directory; a target's parent keeps staging on its filesystem for rename.
+class TempDir {
+public:
+    explicit TempDir(const std::string &parent = {});
+    ~TempDir();
+    TempDir(const TempDir &) = delete;
+    TempDir &operator=(const TempDir &) = delete;
+    const std::string &path() const { return path_; }
+private:
+    std::string path_;
+};
+
+// Copy a regular file to a new path, preserving its permission mode.
+// The destination must not already exist.
+void copy_file(const std::string &from, const std::string &to);
+// Compare filesystem identity, following symlinks and recognizing hard links.
+// Returns false if either path is absent; throws on other inspection errors.
+bool same_file(const std::string &first, const std::string &second);
+// Flush and atomically replace an existing regular file with a stage on
+// the same filesystem. Preserve original permissions/security metadata.
+// A failed pre-commit operation leaves the destination unchanged.
+void atomic_replace_file(const std::string &staged,
+                         const std::string &destination);
+
 struct Sha256 {
     Sha256();
     ~Sha256();
@@ -209,4 +253,3 @@ void launch_browser(const std::string &url);
 std::string config_dir();
 
 }  // namespace platform
-

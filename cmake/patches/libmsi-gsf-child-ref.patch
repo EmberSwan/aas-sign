@@ -1,0 +1,20 @@
+--- a/libmsi/libmsi-database.c
++++ b/libmsi/libmsi-database.c
+@@ -2118,7 +2118,8 @@ static void cache_infile_structure( LibmsiDatabase *db )
+ 
+     for (i = 0; i < n; i++)
+     {
+-        GsfInput *in = gsf_infile_child_by_index(db->infile, i);
++        g_autoptr(GObject) child = G_OBJECT(gsf_infile_child_by_index(db->infile, i));
++        GsfInput *in = GSF_INPUT(child);
+         const char* name = gsf_input_name(in);
+         const uint8_t *name8 = (const uint8_t *)name;
+ 
+@@ -2144,7 +2145,6 @@ static void cache_infile_structure( LibmsiDatabase *db )
+             else
+             {
+                 r = msi_alloc_stream(db, name, GSF_INPUT(in));
+-                g_object_unref(G_OBJECT(in));
+             }
+         } else {
+             msi_open_storage(db, name);

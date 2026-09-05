@@ -1,13 +1,10 @@
 #include "app.hpp"
 #include "auth_laptop.hpp"
 #include "azure.hpp"
-#include "cms.hpp"
-#include "msi.hpp"
 #include "oidc.hpp"
-#include "pe.hpp"
 #include "platform.hpp"
 #include "signer.hpp"
-#include "tsa.hpp"
+#include "signing.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -50,11 +47,11 @@ static void usage_full(const char *argv0)
         << "       " << argv0 << " config REGION:ACCOUNT:PROFILE\n"
         << "       " << argv0 << " --version | --help\n"
         << "\n"
-        << "Sign PE images (EXE, DLL) and MSI packages via Azure "
+        << "Sign PE images, MSI, MSIX and MSIX bundles via Azure "
            "Artifact Signing (Trusted Signing).\n"
         << "\n"
         << "Subcommands:\n"
-        << "  sign FILE ...        Sign one or more PE images or MSI packages.\n"
+        << "  sign FILE ...        Sign PE images, MSI, MSIX or MSIX bundles.\n"
         << "  login                Interactive browser login; caches a refresh\n"
         << "                       token under ${XDG_CONFIG_HOME:-~/.config}/\n"
         << "                       aas-sign (or %APPDATA%\\aas-sign on Windows).\n"
@@ -96,6 +93,10 @@ static void usage_full(const char *argv0)
         << "  --no-timestamp       Skip timestamping.  Not recommended -- Azure\n"
         << "                       Trusted Signing certs are short-lived (days).\n"
         << "  --msi-dse            Add the enhanced MSI metadata signature stream.\n"
+        << "  --recursive          Sign unsigned PE payloads inside embedded MSI\n"
+        << "                       cabinets and Binary streams, then sign the MSI.\n"
+        << "                       Preserves signed PEs; ignored for other targets.\n"
+        << "  --osslsigncode PATH  Companion executable (default: sibling, then PATH).\n"
         << "  --max-parallel N     Maximum concurrent sign operations when\n"
         << "                       signing multiple files.  Default: 8.\n"
         << "  --dump-cms FILE      Write raw CMS DER blob to FILE for debugging\n"
@@ -154,6 +155,10 @@ struct Config {
     std::string timestamp_url;
     bool no_timestamp = false;
     bool msi_dse = false;
+    bool recursive = false;
+    std::string osslsigncode;
+    std::string ca_bundle;
+    bool insecure = false;
     std::string dump_cms;  // valid only when signing a single file
     // OIDC (CI-only) mode: when --token/$AZURE_ACCESS_TOKEN aren't set
     // but both of these are, perform the GitHub-Actions OIDC flow to
@@ -237,100 +242,21 @@ static SignResult sign_one_file(const std::string &file, const Config &cfg,
     SignResult r;
     r.file = file;
     try {
-        uint8_t magic[8];
-        {
-            platform::File probe(file);
-            probe.read_at(0, magic, sizeof(magic));
-        }
-        static const uint8_t cfb[] = {
-            0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1
-        };
-        bool is_msi = !std::memcmp(magic, cfb, sizeof(cfb));
-        std::string lower = file;
-        std::transform(lower.begin(), lower.end(), lower.begin(),
-                       [](unsigned char c) { return char(std::tolower(c)); });
-        bool msi_extension = lower.size() >= 4 &&
-                             lower.substr(lower.size() - 4) == ".msi";
-        if (is_msi && !msi_extension)
-            throw std::runtime_error(
-                "compound file is not a supported .msi package");
-        if (msi_extension && !is_msi)
-            throw std::runtime_error("not an MSI compound file");
-
-        std::unique_ptr<PeFile> pe;
-        std::unique_ptr<MsiFile> msi;
-        std::array<uint8_t, 32> file_hash;
-        std::vector<uint8_t> msi_metadata;
-        if (is_msi) {
-            msi = std::make_unique<MsiFile>(file);
-            auto digest = msi->authenticode_hash(cfg.msi_dse);
-            file_hash = digest.file;
-            msi_metadata = std::move(digest.metadata);
-            log.line() << "MSI format"
-                       << (cfg.msi_dse ? " (enhanced metadata signature)" : "")
-                       << '\n';
-        } else {
-            pe = std::make_unique<PeFile>(file);
-            file_hash = pe->authenticode_hash();
-            log.line() << "PE format: "
-                       << (pe->is_pe32plus ? "PE32+" : "PE32") << '\n';
-        }
-
-        // Compute Authenticode hash.
-        {
-            auto ls = log.line();
-            ls << "Authenticode SHA-256: ";
-            char buf[3];
-            for (auto b : file_hash) {
-                std::snprintf(buf, sizeof(buf), "%02x", b);
-                ls << buf;
-            }
-            ls << '\n';
-        }
-
-        // Compute SHA-256 of authenticated attributes.
-        auto format = is_msi ? AuthenticodeFormat::Msi
-                             : AuthenticodeFormat::Pe;
-        auto attrs_hash = cms_auth_attrs_hash(file_hash, format);
-
-        // Sign via Azure.
-        log.line() << "Signing...\n";
-        auto sign_result = azure_sign(cfg.endpoint, cfg.account, cfg.profile,
-                                      cfg.token, attrs_hash.data(),
-                                      attrs_hash.size());
-
-        // RFC 3161 timestamp (optional).
-        std::vector<uint8_t> timestamp_token;
-        if (!cfg.no_timestamp) {
-            log.line() << "Requesting timestamp from " << cfg.timestamp_url
-                       << " ...\n";
-            timestamp_token = tsa_timestamp(cfg.timestamp_url,
-                                            sign_result.signature);
-            log.line() << "Timestamp token received ("
-                       << timestamp_token.size() << " bytes)\n";
-        }
-
-        // Build CMS and inject into the target file.
-        auto cms_der = cms_build_authenticode(file_hash,
-                                              sign_result.signature,
-                                              sign_result.cert_chain_der,
-                                              timestamp_token, format);
-
-        if (!cfg.dump_cms.empty()) {
-            platform::write_whole_file(cfg.dump_cms, cms_der.data(),
-                                       cms_der.size());
-            log.line() << "CMS blob written to " << cfg.dump_cms
-                       << " (" << cms_der.size() << " bytes)\n";
-        }
-
-        log.line() << "Injecting signature (" << cms_der.size()
-                   << " bytes)...\n";
-        if (msi)
-            msi->inject_signature(cms_der, msi_metadata);
-        else
-            pe->inject_signature(cms_der);
-
-        log.line() << "Signed " << file << " successfully.\n";
+        SigningOptions options;
+        options.osslsigncode = cfg.osslsigncode;
+        options.timestamp_url = cfg.timestamp_url;
+        options.no_timestamp = cfg.no_timestamp;
+        options.msi_dse = cfg.msi_dse;
+        options.recursive = cfg.recursive;
+        options.dump_cms = cfg.dump_cms;
+        options.ca_bundle = cfg.ca_bundle;
+        options.insecure = cfg.insecure;
+        sign_file(file, options,
+            [&](const std::array<uint8_t, 32> &digest) {
+                return azure_sign(cfg.endpoint, cfg.account, cfg.profile,
+                                  cfg.token, digest.data(), digest.size());
+            },
+            [&](const std::string &line) { log.line() << line; });
         r.ok = true;
     } catch (const std::exception &e) {
         log.line() << "error: " << e.what() << '\n';
@@ -339,9 +265,11 @@ static SignResult sign_one_file(const std::string &file, const Config &cfg,
     return r;
 }
 
-static int sign_main(int argc, char **argv)
+static int sign_main(int argc, char **argv, const std::string &ca_bundle, bool insecure)
 {
     Config cfg;
+    cfg.ca_bundle = ca_bundle;
+    cfg.insecure = insecure;
     cfg.timestamp_url = DEFAULT_TSA_URL;
     std::vector<std::string> files;
     int max_parallel = 8;
@@ -371,6 +299,10 @@ static int sign_main(int argc, char **argv)
             cfg.no_timestamp = true;
         else if (!strcmp(argv[i], "--msi-dse"))
             cfg.msi_dse = true;
+        else if (!strcmp(argv[i], "--recursive"))
+            cfg.recursive = true;
+        else if (!strcmp(argv[i], "--osslsigncode") && i + 1 < argc)
+            cfg.osslsigncode = argv[++i];
         else if (!strcmp(argv[i], "--max-parallel") && i + 1 < argc)
             max_parallel = std::max(1, atoi(argv[++i]));
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -431,6 +363,14 @@ static int sign_main(int argc, char **argv)
         std::ostringstream os;
         os << "warning: ignoring unreadable config.json: " << e.what() << '\n';
         platform::write_stderr(os.str());
+    }
+
+    // Fail before authentication/network activity if the companion is missing.
+    try {
+        cfg.osslsigncode = resolve_osslsigncode(cfg.osslsigncode);
+    } catch (const std::exception &e) {
+        platform::write_stderr(std::string("error: ") + e.what() + "\n");
+        return 1;
     }
 
     // Token resolution, in order of precedence:
@@ -581,14 +521,18 @@ int aas_sign_main(int argc, char **argv)
         for (int k = 0; k < n; k++)
             argv[--argc] = nullptr;
     };
+    std::string ca_bundle;
+    bool insecure = false;
     for (int i = 1; i < argc; ) {
         if (!strcmp(argv[i], "--insecure")) {
+            insecure = true;
             platform::tls_disable_verification();
             platform::write_stderr(
                 "warning: --insecure: TLS certificate verification "
                 "is disabled\n");
             erase_argv(i, 1);
         } else if (!strcmp(argv[i], "--cacert") && i + 1 < argc) {
+            ca_bundle = argv[i + 1];
             platform::tls_set_ca_bundle(argv[i + 1]);
             erase_argv(i, 2);
         } else {
@@ -610,7 +554,7 @@ int aas_sign_main(int argc, char **argv)
         return 0;
     }
     if (!strcmp(argv[1], "sign"))
-        return sign_main(argc, argv);
+        return sign_main(argc, argv, ca_bundle, insecure);
     if (!strcmp(argv[1], "login"))
         return login_main(argc, argv);
     if (!strcmp(argv[1], "logout"))
