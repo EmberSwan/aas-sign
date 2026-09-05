@@ -1,0 +1,3 @@
+[submodule "modules/osslsigncode"]
+	path = modules/osslsigncode
+	url = https://github.com/mtrojnar/osslsigncode.git
