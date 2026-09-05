@@ -6,14 +6,89 @@ private keys. aas-sign handles authentication, Azure requests, and CMS
 assembly. An unmodified [osslsigncode](https://github.com/mtrojnar/osslsigncode)
 companion handles file formats, signature attachment, and RFC 3161 timestamps.
 
+## GitHub Actions
+
+The composite action supports Linux and Windows x86_64 runners. It installs
+both executables, exchanges a GitHub OIDC token for an Azure token, and signs
+the files you list. A pre-minted Azure token can also be supplied.
+Before installation, it verifies both binaries against the independently
+published manifest at
+`https://artifacts.emberswan.com/aas-sign/VERSION/sha256sums.txt`.
+Neither `azure/login` nor the Azure CLI is required:
+
+```yaml
+permissions:
+  id-token: write      # required for GitHub OIDC federation
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Add your build steps here before signing.
+      - uses: EmberSwan/aas-sign@v2.0.0
+        with:
+          endpoint:  eus.codesigning.azure.net
+          account:   myaccount
+          profile:   myprofile
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          msi-dse: true
+          recursive: true
+          files: |
+            dist/myapp.exe
+            dist/mylib.dll
+            dist/installer.msi
+            dist/application.msixbundle
+```
+
+For bundles, sign each inner package before your build creates the bundle.
+`recursive: true` applies only to MSI files; it does not sign packages inside
+an MSIX bundle. File paths are literal, one per line; globs are not expanded.
+
+The Azure app registration for `client-id` must have a
+federated-credential configured to trust the caller repo/environment.
+See Microsoft's [workload identity federation docs][wif].
+
+Inputs:
+
+| Input           | Required | Default                                      | Notes                                   |
+| --------------- | -------- | -------------------------------------------- | --------------------------------------- |
+| `endpoint`      | yes      | —                                            | Artifact Signing endpoint host          |
+| `account`       | yes      | —                                            | Artifact Signing account                |
+| `profile`       | yes      | —                                            | Certificate profile                     |
+| `files`         | yes      | —                                            | One path per line; blanks ignored       |
+| `client-id`     | see note | —                                            | Azure app ID for OIDC                   |
+| `tenant-id`     | see note | —                                            | Azure tenant for OIDC                   |
+| `token`         | see note | —                                            | Pre-minted bearer (alternative to OIDC) |
+| `version`       | no       | `v2.0.0`                                     | aas-sign release to install             |
+| `timestamp-url` | no       | Microsoft ACS                                | Override RFC 3161 TSA                   |
+| `no-timestamp`  | no       | `false`                                      | Set `"true"` to skip timestamping       |
+| `msi-dse`       | no       | `false`                                      | Add enhanced MSI metadata signature     |
+| `recursive`     | no       | `false`                                      | Sign unsigned embedded MSI PE payloads  |
+| `max-parallel`  | no       | 8                                            | Concurrent sign operations              |
+
+Provide either `client-id` and `tenant-id` for OIDC, or a pre-minted `token`.
+OIDC requires `id-token: write`, an Azure federated credential matching the
+caller, and permission to sign with the selected certificate profile. Client
+and tenant IDs are identifiers, not credentials; they can also be stored as
+GitHub configuration variables. A supplied bearer token is masked in the log.
+
+The `version` input selects the binary release independently of the action
+reference. The v2 action requires the v2 asset layout and cannot install v1
+release assets.
+
 ## Installation and building
 
-Download **both executables for your platform** from the same release and
+Download **both executables for your platform** from the same
+[release](https://github.com/EmberSwan/aas-sign/releases) and
 verify them against the independently published
 `https://artifacts.emberswan.com/aas-sign/<release-tag>/sha256sums.txt`.
 Download names include the aas-sign version or osslsigncode short revision.
 Rename them to `aas-sign[.exe]` and `osslsigncode[.exe]` and place them together.
-The action installs and verifies both automatically.
+aas-sign looks beside its own executable first, then on `PATH`. Use
+`--osslsigncode PATH` to select the companion explicitly.
 
 To build from Git, initialize the recorded upstream submodule:
 
@@ -58,16 +133,17 @@ endpoint, pass the full hostname instead of the slug.  For example:
 
 The login command opens your browser (Microsoft Entra Authorization
 Code + PKCE), caches a refresh token at
-`~/.config/aas-sign/token-cache.json` (POSIX) or
+`${XDG_CONFIG_HOME:-~/.config}/aas-sign/token-cache.json` (POSIX) or
 `%APPDATA%\aas-sign\token-cache.json` (Windows), and saves the three
 signing defaults to `config.json` in the same directory.  Subsequent
 `aas-sign sign` invocations silently mint fresh access tokens from
 the cache and read the signing target from `config.json` — no
 Azure CLI, no retyping.
 
-The cache is revoked if you log out in Entra, the refresh token
-expires (~90 days of inactivity), or you delete the file (or run
-`aas-sign logout`).  Rerun `aas-sign login` to refresh.
+If Microsoft rejects the refresh token because it expired or was revoked,
+run `aas-sign login` again. `aas-sign logout` deletes only the local token
+cache; it does not revoke the token in Microsoft Entra or remove the saved
+signing configuration.
 
 To update the saved defaults later without re-authenticating, use
 `aas-sign config`:
@@ -83,7 +159,7 @@ The three long flags `--endpoint`, `--account`, `--profile` are
 accepted everywhere the tuple is (mutually exclusive with it).
 They're what the GitHub Action emits under the hood and are the
 path to take when the three values come from separate variables
-(CI secrets, etc.) rather than as one string.
+rather than as one string.
 
 ### Full synopsis
 
@@ -106,15 +182,22 @@ path to take when the three values come from separate variables
     $ aas-sign --version | --help
 
 Authentication (first match wins): `--token`, `$AZURE_ACCESS_TOKEN`,
-`--oidc-*` flags (GitHub Actions runner only), cached login from
-`aas-sign login`.
+GitHub OIDC, then the cached login from `aas-sign login`. OIDC uses
+`--oidc-client-id` and `--oidc-tenant-id`, falling back to `AZURE_CLIENT_ID`
+and `AZURE_TENANT_ID`, and requires the GitHub runner's OIDC environment.
+
+Global options include `--cacert PATH` for a custom PEM trust bundle and
+`--insecure` to disable HTTPS certificate verification for diagnostics.
+On Windows, Azure HTTPS uses the system certificate store; the companion
+also receives the custom CA option for its HTTPS requests.
 
 By default, the signature is timestamped against Microsoft's free TSA at
 `http://timestamp.acs.microsoft.com/timestamping/RFC3161`.  This is
-**strongly recommended** because Azure Trusted Signing issues
-short-lived certificates (on the order of days); without a timestamp, the
-signature becomes invalid as soon as the signing cert expires.  A
-timestamped signature remains verifiable indefinitely.
+**strongly recommended** because Azure Artifact Signing issues short-lived
+certificates. A trusted timestamp allows verification after the signing
+certificate expires, subject to certificate trust, revocation, and the
+verifier's policy. See Microsoft's
+[certificate management documentation][certificates].
 
 Use `--timestamp-url` to point at a different RFC 3161 TSA, or
 `--no-timestamp` to skip timestamping entirely (not recommended for
@@ -160,8 +243,9 @@ Recursive mode supports self-contained, non-spanning cabinets using uncompressed
 MSZIP, or LZX input; rebuilt cabinets use MSZIP. External cabinets, loose source
 files, embedded database storages/transforms, and other compression types are
 rejected. Extraction is limited to 65,535 payload members and 1 GiB total.
-File sizes and applicable existing installer hash rows are updated. A changed
-payload gets a new PackageCode; ProductCode and UpgradeCode remain unchanged.
+File sizes and applicable existing installer hash rows are updated. An MSI
+with changed payload bytes gets a new PackageCode; ProductCode and UpgradeCode
+remain unchanged.
 Run recursive signing before generating patches/transforms tied to the final MSI.
 
 If there are no unsigned PEs, the tool skips reconstruction and signs just the
@@ -173,118 +257,19 @@ parent worker, so `--max-parallel` remains the total signing-concurrency bound.
 
 When multiple files are given, they are signed in parallel with up to 8
 in flight by default.  Use `--max-parallel N` to change the cap, or
-`--max-parallel 1` for fully sequential signing.  The Azure signing API
-is async and handles concurrent requests from the same token without
-trouble.
+`--max-parallel 1` for sequential signing. Reduce the limit if needed
+for service throttling or local resource constraints.
 
 In batch mode each file's progress output is prefixed with `[path]` and
 buffered, then flushed as a single block when that file finishes, so
 concurrent narratives don't interleave.  On completion the tool prints
 a summary and exits non-zero if any file failed.
 
-### GitHub Actions
+## Release assets
 
-A composite action is published alongside the tool.  It installs the
-release pair for the runner OS, performs the GitHub-Actions
-OIDC handshake to mint an Azure token, and signs every file you list.
-Before installing it verifies both binaries against the independently
-published manifest at
-`https://artifacts.emberswan.com/aas-sign/VERSION/sha256sums.txt`.
-No `azure/login`, no Azure CLI on the runner:
-
-```yaml
-permissions:
-  id-token: write      # required for GitHub OIDC federation
-  contents: read
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - ...                         # your build steps here
-      - uses: EmberSwan/aas-sign@v2.0.0
-        with:
-          endpoint:  eus.codesigning.azure.net
-          account:   myaccount
-          profile:   myprofile
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          msi-dse: true
-          recursive: true
-          files: |
-            dist/myapp.exe
-            dist/mylib.dll
-            dist/installer.msi
-            dist/application.msixbundle
-```
-
-The Azure app registration for `client-id` must have a
-federated-credential configured to trust the caller repo/environment.
-See Microsoft's [workload identity federation docs][wif].
-
-The [dcmake project uses this action][dcmake] in its build pipeline, which
-can serve as a working example.
-
-[dcmake]: https://github.com/skeeto/dcmake/blob/master/.github/workflows/release.yml
-[wif]: https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust?pivots=identity-wif-apps-methods-azp
-
-Inputs:
-
-| Input           | Required | Default                                      | Notes                                  |
-| --------------- | -------- | -------------------------------------------- | -------------------------------------- |
-| `endpoint`      | yes      | —                                            | Trusted Signing endpoint host          |
-| `account`       | yes      | —                                            | Trusted Signing account                |
-| `profile`       | yes      | —                                            | Certificate profile                    |
-| `files`         | yes      | —                                            | One path per line; blanks ignored      |
-| `client-id`     | see note | —                                            | Azure app ID for OIDC                  |
-| `tenant-id`     | see note | —                                            | Azure tenant for OIDC                  |
-| `token`         | see note | —                                            | Pre-minted bearer (alternative to OIDC)|
-| `version`       | no       | `v2.0.0`                                     | aas-sign release to install            |
-| `timestamp-url` | no       | Microsoft ACS                                | Override RFC 3161 TSA                  |
-| `no-timestamp`  | no       | `false`                                      | Set `"true"` to skip timestamping      |
-| `msi-dse`       | no       | `false`                                      | Add enhanced MSI metadata signature    |
-| `recursive`     | no       | `false`                                      | Sign unsigned embedded MSI PE payloads |
-| `max-parallel`  | no       | 8                                            | Concurrent sign operations             |
-
-Either provide `client-id` + `tenant-id` (preferred — no extra setup
-on the caller's side) or a pre-minted `token`.  When provided, `token`
-is masked in the log.
-
-## Releases
-
-`.github/workflows/release.yml` builds both tools for Linux and Windows,
-signs and timestamps both Windows executables with the freshly built Linux
-pair, then publishes a GitHub release with checksums of the final bytes.  Triggered by pushing a
-tag matching `v*`.
-
-The sign-and-release job runs under a GitHub Actions *environment*
-called `release`.  Create it at Settings → Environments → New
-environment → `release`, then add the secrets there (not at the
-repository level).  Using an environment lets the Azure
-federated-credential binding match
-`repo:<owner>/<repo>:environment:release`, which is more stable than
-matching on tag refs.
-
-Required environment configuration (Settings → Environments → `release`):
-
-| Name                       | Purpose                                      |
-| -------------------------- | -------------------------------------------- |
-| `AZURE_CLIENT_ID`          | OIDC federated-identity app ID               |
-| `AZURE_TENANT_ID`          | Azure tenant                                 |
-| `TRUSTED_SIGNING_ENDPOINT` | e.g. `eus.codesigning.azure.net`             |
-| `TRUSTED_SIGNING_ACCOUNT`  | Trusted Signing account name                 |
-| `CERTIFICATE_PROFILE`      | Certificate profile name                     |
-
-The workflow reads `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` from environment
-secrets, and the three signing resource identifiers from environment variables.
-
-`aas-sign` performs the OIDC-to-Azure-token exchange itself via its
-`--oidc-client-id` / `--oidc-tenant-id` flags (which read
-`AZURE_CLIENT_ID` / `AZURE_TENANT_ID` from the process environment as a
-fallback).  The release workflow sets those env vars from the secrets
-above and then invokes `aas-sign` directly — no `azure/login`, no
-Azure CLI on the runner, no `AZURE_SUBSCRIPTION_ID` needed.
+Each release includes both tools, a source archive, dependency provenance,
+third-party notices, and checksums. Both Windows executables are signed and
+timestamped; checksums cover the final distributed files.
 
 Linux releases use static third-party libraries on top of dynamic glibc
 (Ubuntu 24.04 baseline). aas-sign's Windows executable is cross-compiled with
@@ -303,8 +288,7 @@ The submodule gitlink alone pins osslsigncode. Updating it changes the derived
 asset names; the action discovers the companion name from the independent
 manifest, without a duplicated revision constant. osslsigncode's own version
 output is unmodified. The action deliberately rejects releases missing the
-expected versioned assets. After publishing, upload the identical checksum
-manifest to the immutable R2 URL before using the new action release.
+expected versioned assets.
 
 ## How it works
 
@@ -322,15 +306,22 @@ The companion is invoked directly, without shell command construction. Azure
 and GitHub authentication variables are removed from its environment. Tokens
 are never placed in companion arguments or temporary files.
 
-## Verifying
+## Verifying signatures
 
-On Linux/macOS:
+With osslsigncode:
 
-    $ osslsigncode verify myapp.exe
-    $ osslsigncode verify installer.msi
+    $ osslsigncode verify -in myapp.exe
+    $ osslsigncode verify -in installer.msi
+    $ osslsigncode verify -in application.msix
+
+If your system trust store lacks the required code-signing or timestamp roots,
+provide trusted PEM bundles with `-CAfile` and `-TSA-CAfile`. Check both the code
+signature and timestamp verification results; a successful process exit alone
+does not guarantee that timestamp trust verification succeeded.
 
 On Windows: right-click the file → Properties → Digital Signatures, or
 run `signtool verify /pa myapp.exe` (or pass the MSI path).
 
-
-[aas]: https://learn.microsoft.com/en-us/azure/trusted-signing/
+[aas]: https://learn.microsoft.com/en-us/azure/artifact-signing/overview
+[certificates]: https://learn.microsoft.com/en-us/azure/artifact-signing/concept-certificate-management
+[wif]: https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust?pivots=identity-wif-apps-methods-azp
