@@ -9,3 +9,7 @@ and SHA-256 APPX fixtures. See the submodule's COPYING.txt and LICENSE.txt.
 
 The MSI reconstruction tests also generate a complete multi-cabinet fixture;
 see tests/fixtures/README.md for its source and regeneration instructions.
+`msi/string-refcount.msi` is a malformed mutation of that generated fixture,
+retained as a regression for libmsi string-table cleanup.
+`msi/missing-column.msi` and `msi/summary-offset.msi` are further mutations
+retained for libmsi table-cleanup and summary-bounds regressions.

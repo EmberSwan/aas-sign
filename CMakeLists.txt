@@ -179,7 +179,8 @@ if(BUILD_TESTING AND NOT WIN32)
   add_test(NAME libmsi_ownership_test
     COMMAND libmsi_ownership_test
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/recursive.msi"
-            "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/msi/minimal-msi-v3.msi")
+            "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/msi/minimal-msi-v3.msi"
+            "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/msi/string-refcount.msi")
 
   add_executable(cms_test
     tests/cms_test.cpp src/cms.cpp src/der.cpp src/x509.cpp src/posix.cpp)
@@ -217,6 +218,12 @@ if(BUILD_TESTING AND AAS_SIGN_FUZZ)
       -dict=${CMAKE_CURRENT_SOURCE_DIR}/fuzz/msi.dict
       ${_aas_fuzz_msi_corpus})
   set_tests_properties(fuzz_msi_smoke PROPERTIES TIMEOUT 60)
+  add_test(NAME fuzz_msi_regressions
+    COMMAND fuzz_msi -runs=1
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/recursive.msi
+      ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/msi/string-refcount.msi
+      ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/msi/missing-column.msi
+      ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/msi/summary-offset.msi)
 endif()
 
 if(BUILD_TESTING)

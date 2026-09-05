@@ -1,0 +1,21 @@
+--- a/libmsi/string.c
++++ b/libmsi/string.c
+@@ -113,9 +113,7 @@ void msi_destroy_stringtable( string_table *st )
+ 
+     for( i=0; i<st->maxcount; i++ )
+     {
+-        if( st->strings[i].persistent_refcount ||
+-            st->strings[i].nonpersistent_refcount )
+-            msi_free( st->strings[i].str );
++        msi_free( st->strings[i].str );
+     }
+     msi_free( st->strings );
+     msi_free( st->sorted );
+@@ -213,6 +211,7 @@ static void set_st_entry( string_table *st, unsigned n, char *str, uint16_t refcount,
+         st->strings[n].nonpersistent_refcount = refcount;
+     }
+ 
++    msi_free( st->strings[n].str );
+     st->strings[n].str = str;
+ 
+     insert_string_sorted( st, n );

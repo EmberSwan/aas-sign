@@ -107,7 +107,7 @@ def main():
         src = trees[name]
         build = args.build / name
         stamp = args.build / (name + ".built")
-        patches = [ROOT / "cmake/patches/libmsi-gsf-child-ref.patch"] if name == "msitools" else []
+        patches = sorted((ROOT / "cmake/patches").glob("libmsi-*.patch")) if name == "msitools" else []
         patch_identity = "".join(hashlib.sha256(path.read_bytes()).hexdigest() for path in patches)
         identity = hashlib.sha256((SOURCES[name]["sha256"] + pathlib.Path(__file__).read_text()
                                   + patch_identity + str(prefix) + environment.get("CC", "") + environment.get("CFLAGS", "")).encode()).hexdigest()

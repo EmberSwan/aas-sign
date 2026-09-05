@@ -1,0 +1,251 @@
+--- a/libmsi/libmsi-summary-info.c
++++ b/libmsi/libmsi-summary-info.c
+@@ -129,7 +129,7 @@
+     if (self->database) {
+         r = msi_get_raw_stream (self->database, szSumInfo, &stm);
+         if (r == 0) {
+-            load_summary_info (self, stm);
++            self->load_result = load_summary_info (self, stm);
+             g_object_unref (G_OBJECT (stm));
+         }
+     }
+@@ -306,118 +306,84 @@
+     *ft = (t + 134774ULL * 86400ULL) * 10000000ULL;
+ }
+ 
+-/* FIXME: doesn't deal with endian conversion */
+-static void read_properties_from_data( LibmsiOLEVariant *prop, const uint8_t *data, unsigned sz, uint32_t cProperties )
+-{
+-    unsigned type;
+-    unsigned i;
+-    LibmsiOLEVariant *property;
+-    uint32_t idofs, len;
+-    char *str = NULL;
+-    gboolean valid;
+-
+-    idofs = 8;
+-
+-    /* now set all the properties */
+-    for( i = 0; i < cProperties; i++ )
+-    {
+-        valid = TRUE;
+-        int propid = read_dword(data, &idofs);
++static gboolean read_properties_from_data( LibmsiOLEVariant *prop, const uint8_t *data, unsigned sz, uint32_t cProperties )
++{
++    unsigned i, idofs = 8;
++
++    if (sz < 8 || cProperties > (sz - 8) / 8)
++        return FALSE;
++
++    for (i = 0; i < cProperties; i++)
++    {
++        unsigned propid = read_dword(data, &idofs);
+         unsigned dwOffset = read_dword(data, &idofs);
+-        int proptype;
+-
+-        if( propid >= MSI_MAX_PROPS )
+-        {
+-            g_critical("Unknown property ID %d\n", propid );
+-            break;
+-        }
+-
+-        type = get_type( propid );
+-        if( type == OLEVT_EMPTY )
+-        {
+-            g_critical("propid %d has unknown type\n", propid);
+-            break;
+-        }
+-
+-        property = &prop[ propid ];
+-
+-        if( dwOffset + 4 > sz )
+-        {
+-            g_critical("not enough data for type %d %d \n", dwOffset, sz);
+-            break;
+-        }
+-
++        unsigned type, proptype, len;
++        LibmsiOLEVariant *property;
++        char *str = NULL;
++
++        if (propid >= MSI_MAX_PROPS)
++            return FALSE;
++        type = get_type(propid);
++        if (type == OLEVT_EMPTY)
++            return FALSE;
++        property = &prop[propid];
++        /* Repeated IDs would overwrite an owned string or reinterpret its union. */
++        if (property->vt != OLEVT_EMPTY)
++            return FALSE;
++        if (dwOffset < 8 + cProperties * 8 || dwOffset > sz || sz - dwOffset < 4)
++            return FALSE;
+         proptype = read_dword(data, &dwOffset);
+-        if( dwOffset + 4 > sz )
+-        {
+-            g_critical("not enough data for type %d %d \n", dwOffset, sz);
+-            break;
+-        }
+-
+-        switch(proptype)
++        if (sz - dwOffset < 4)
++            return FALSE;
++
++        switch (proptype)
+         {
+         case OLEVT_I2:
+         case OLEVT_I4:
+             property->intval = read_dword(data, &dwOffset);
+             break;
+         case OLEVT_FILETIME:
+-            if( dwOffset + 8 > sz )
+-            {
+-                g_critical("not enough data for type %d %d \n", dwOffset, sz);
+-                valid = FALSE;
+-                break;
+-            }
++            if (sz - dwOffset < 8)
++                return FALSE;
+             property->filetime = read_dword(data, &dwOffset);
+             property->filetime |= (guint64)read_dword(data, &dwOffset) << 32;
+             break;
+         case OLEVT_LPSTR:
+             len = read_dword(data, &dwOffset);
+-            if(len == 0 || dwOffset + len > sz )
+-            {
+-                g_critical("not enough data for type %d %d %d \n", dwOffset, len, sz);
+-                valid = FALSE;
+-                break;
+-            }
+-            str = msi_alloc( len );
+-            memcpy( str, &data[dwOffset], len-1 );
+-            str[ len - 1 ] = 0;
++            if (!len || len > sz - dwOffset || data[dwOffset + len - 1] != 0)
++                return FALSE;
++            str = g_try_malloc(len);
++            if (!str)
++                return FALSE;
++            memcpy(str, &data[dwOffset], len);
+             break;
+         default:
+-            g_warn_if_reached ();
++            return FALSE;
+         }
+ 
+-        if (valid == FALSE) {
+-            break;
+-        }
+-
+-        /* check the type is the same as we expect */
+-        if( type == OLEVT_LPSTR && proptype == OLEVT_LPSTR)
+-           property->strval = str;
++        if (type == OLEVT_LPSTR && proptype == OLEVT_LPSTR)
++            property->strval = str;
+         else if (type == proptype)
+-           ;
+-        else if( proptype == OLEVT_LPSTR) {
+-            g_return_if_fail(str != NULL);
+-            if( type == OLEVT_I2 || type == OLEVT_I4) {
+-                property->intval = atoi( str );
+-            } else if( type == OLEVT_FILETIME) {
+-                parse_filetime( str, &property->filetime );
+-            } else {
+-                g_critical("invalid type, it can't be converted\n");
++            ;
++        else if (proptype == OLEVT_LPSTR)
++        {
++            if (type == OLEVT_I2 || type == OLEVT_I4)
++                property->intval = atoi(str);
++            else if (type == OLEVT_FILETIME)
++                parse_filetime(str, &property->filetime);
++            else
++            {
+                 msi_free(str);
+-                break;
++                return FALSE;
+             }
+             proptype = type;
+-            msi_free (str);
++            msi_free(str);
+         }
+         else
+-        {
+-            g_critical("invalid type \n");
+-            break;
+-        }
+-
+-        /* Now we now the type is valid, store it */
++            return FALSE;
+         property->vt = proptype;
+     }
++    return TRUE;
+ }
+ 
+ static unsigned load_summary_info( LibmsiSummaryInfo *si, GsfInput *stm )
+@@ -426,14 +392,14 @@
+     uint8_t *data = NULL;
+     unsigned ofs, dwOffset;
+     unsigned cbSection, cProperties;
+-    off_t sz;
++    gsf_off_t sz;
+ 
+     TRACE("%p %p\n", si, stm);
+ 
+     sz = gsf_input_size(stm);
+-    if (!sz)
++    if (sz < 48 || sz > G_MAXUINT)
+         return ret;
+-    data = g_try_malloc(gsf_input_size(stm));
++    data = g_try_malloc((gsize)sz);
+     if (!data)
+         return LIBMSI_RESULT_NOT_ENOUGH_MEMORY;
+ 
+@@ -458,21 +424,23 @@
+     /* seek to the location of the section */
+     ofs += 16;
+     ofs = dwOffset = read_dword(data, &ofs);
++    if (dwOffset < 48 || dwOffset > (unsigned)sz || (unsigned)sz - dwOffset < 8)
++        goto done;
+ 
+     /* read the section itself */
+     cbSection = read_dword( data, &ofs );
+     cProperties = read_dword( data, &ofs );
+ 
+-    if( cProperties > MSI_MAX_PROPS )
++    if (cbSection < 8 || cbSection > (unsigned)sz - dwOffset ||
++        cProperties > MSI_MAX_PROPS || cProperties > (cbSection - 8) / 8)
+     {
+         g_critical("too many properties %d\n", cProperties);
+         goto done;
+     }
+ 
+     /* read all the data in one go */
+-    read_properties_from_data( si->property,
+-                               &data[dwOffset],
+-                               cbSection, cProperties );
++    if (read_properties_from_data(si->property, &data[dwOffset], cbSection, cProperties))
++        ret = LIBMSI_RESULT_SUCCESS;
+ 
+ done:
+     msi_free( data );
+@@ -1141,5 +1109,11 @@
+                          "update-count", update_count,
+                          NULL);
+ 
++    if (self->load_result != LIBMSI_RESULT_SUCCESS) {
++        g_set_error_literal(error, LIBMSI_RESULT_ERROR, self->load_result,
++                            "Invalid summary information stream");
++        g_object_unref(self);
++        return NULL;
++    }
+     return self;
+ }
+--- a/libmsi/msipriv.h
++++ b/libmsi/msipriv.h
+@@ -304,6 +304,7 @@
+ 
+     LibmsiDatabase *database;
+     unsigned update_count;
++    unsigned load_result;
+     LibmsiOLEVariant property[MSI_MAX_PROPS];
+ };
+ 

@@ -19,7 +19,7 @@ sources = json.loads((ROOT / "cmake/dependency-sources.json").read_text())
     "osslsigncode": {"revision": revision, "source": f"https://github.com/mtrojnar/osslsigncode/tree/{revision}", "modified": False},
     "static-dependencies": sources,
     "rebuild": "git clone --recurse-submodules; see scripts/build-osslsigncode.py and scripts/build-dependencies.py",
-    "build-adaptations": "gcab and msitools: use library() instead of shared_library() in a private build copy to honor static builds; apply the listed libmsi reference ownership fix",
+    "build-adaptations": "gcab and msitools: use library() instead of shared_library() in a private build copy to honor static builds; apply the listed libmsi ownership and bounds fixes",
     "dependency-patches": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
                            for path in sorted((ROOT / "cmake/patches").glob("*.patch"))},
 }, indent=2) + "\n")

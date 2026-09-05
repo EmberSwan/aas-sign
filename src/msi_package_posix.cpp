@@ -151,7 +151,9 @@ void extract_cabinet(const std::string &path, const std::vector<CabinetMember> &
     size_t count = 0;
     for (unsigned i = 0; i < folders->len; ++i) {
         auto folder = GCAB_FOLDER(g_ptr_array_index(folders, i));
-        for (auto item = gcab_folder_get_files(folder); item; item = item->next) {
+        std::unique_ptr<GSList, decltype(&g_slist_free)> files(
+            gcab_folder_get_files(folder), g_slist_free);
+        for (auto item = files.get(); item; item = item->next) {
             auto file = GCAB_FILE(item->data);
             auto it = expected.find(gcab_file_get_name(file));
             if (it == expected.end() || gcab_file_get_size(file) != it->second->size)

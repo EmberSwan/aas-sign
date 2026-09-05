@@ -5,9 +5,9 @@
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) return 2;
+    if (argc < 3) return 2;
     for (unsigned repeat = 0; repeat < 8; ++repeat) {
-        for (unsigned input = 1; input <= 2; ++input) {
+        for (int input = 1; input < argc; ++input) {
             GError *error = NULL;
             LibmsiDatabase *db = libmsi_database_new(argv[input], LIBMSI_DB_FLAGS_READONLY, NULL, &error);
             const gboolean success = db != NULL;

@@ -1,0 +1,19 @@
+--- a/libmsi/table.c
++++ b/libmsi/table.c
+@@ -353,6 +353,6 @@ static void msi_free_colinfo( LibmsiColumnInfo *colinfo, unsigned count )
+ {
+     unsigned i;
+-    for (i = 0; i < count; i++) msi_free( colinfo[i].hash_table );
++    for (i = 0; colinfo && i < count; i++) msi_free( colinfo[i].hash_table );
+ }
+ 
+ static void free_table( LibmsiTable *table )
+@@ -402,7 +402,7 @@ static unsigned read_table_from_storage( LibmsiDatabase *db, LibmsiTable *t, GsfInfile *stg )
+ 
+     TRACE("Read %d bytes\n", rawsize );
+ 
+-    if( rawsize % row_size )
++    if( !row_size || rawsize % row_size )
+     {
+         g_warning("Table size is invalid %d/%d\n", rawsize, row_size );
+         goto err;
