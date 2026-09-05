@@ -32,9 +32,12 @@ def source(name, directory):
         print(f"Downloading {spec['url']}", flush=True)
         with urllib.request.urlopen(spec["url"], timeout=120) as response, archive.open("wb") as output:
             shutil.copyfileobj(response, output)
-    if hashlib.sha256(archive.read_bytes()).hexdigest() != spec["sha256"]:
+    actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+    if actual != spec["sha256"]:
+        size = archive.stat().st_size
         archive.unlink()
-        raise RuntimeError(f"{name}: source checksum mismatch")
+        raise RuntimeError(f"{name}: source checksum mismatch for {spec['url']}: "
+                           f"expected {spec['sha256']}, got {actual} ({size} bytes)")
     temporary = directory / (name + ".extracting")
     shutil.rmtree(temporary, ignore_errors=True)
     temporary.mkdir()
